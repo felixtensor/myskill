@@ -26,3 +26,10 @@ This repository stores the owner's reusable personal workflows as portable Agent
 - Update `catalog.json` and the human-readable catalog in `skills/README.md` when adding, renaming, or removing a skill.
 - Run `python scripts/validate_skills.py` before declaring a skill change complete.
 - Keep repository-level tooling separate from scripts bundled inside an individual skill.
+
+## Commits
+
+- Follow the Conventional Commits format: `<type>[optional scope]: <description>`.
+- Keep every commit-message line at 80 characters or fewer, including body and footer lines.
+- Prefer a short imperative description. Use a body only when it adds useful context.
+- Use `!` and a `BREAKING CHANGE:` footer for breaking changes.

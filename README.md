@@ -68,6 +68,8 @@ python scripts/install_skills.py --dest C:\path\to\agent\skills
 python scripts/validate_skills.py
 ```
 
+提交信息遵循 [贡献约定](CONTRIBUTING.md) 中的 Conventional Commits 规则，每行不超过 80 个字符。
+
 跨 Agent 的目录与安装方式见 [兼容性说明](docs/compatibility.md)。
 
 ## Roadmap
