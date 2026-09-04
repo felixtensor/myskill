@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "categories": {
+    "work": {
+      "label": "工作",
+      "description": "工作交付、协作和例行事务。"
+    },
+    "effective": {
+      "label": "效能",
+      "description": "提升个人效率、质量和决策一致性的工作流。"
+    },
+    "note": {
+      "label": "笔记",
+      "description": "笔记、知识整理和信息归档。"
+    },
+    "linux": {
+      "label": "Linux",
+      "description": "Linux 环境、命令行和系统运维。"
+    }
+  },
+  "skills": {}
+}
