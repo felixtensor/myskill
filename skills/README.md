@@ -10,7 +10,9 @@ skills/
 
 ## Available skills
 
-尚未添加 skill。
+| Skill | 用途 | 分类 |
+| --- | --- | --- |
+| [`commit-style`](commit-style/) | 先读出仓库自己的提交约定，再照着写 commit message | `effective`、`work` |
 
 下一个候选是“周报提交”工作流；在确定触发条件、输入来源、产出格式和提交动作后再创建目录。
 

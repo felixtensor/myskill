@@ -18,5 +18,12 @@
       "description": "Linux 环境、命令行和系统运维。"
     }
   },
-  "skills": {}
+  "skills": {
+    "commit-style": {
+      "categories": [
+        "effective",
+        "work"
+      ]
+    }
+  }
 }

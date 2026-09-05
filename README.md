@@ -4,9 +4,9 @@
 
 ## Skills
 
-目前还是空的。第一个会是周报提交。
+- [`commit-style`](skills/commit-style/) — 先读出仓库自己的提交约定，再照着写 commit message
 
-Skill 列表在 [skills/README.md](skills/README.md)。
+完整列表和分类在 [skills/README.md](skills/README.md)。
 
 ## 常用命令
 
