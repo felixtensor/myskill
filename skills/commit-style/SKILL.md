@@ -74,19 +74,29 @@ message that follows them and one that does not, and where the advice comes from
 
 # Part 2 · 因地制宜 — match the repository
 
-Read the evidence before writing. Stop at the first source that actually answers;
-earlier sources beat later ones.
+**First: whose repository is this going into?** Usually the one you are standing in.
+For a fork, or a patch you mean to send elsewhere, it is the receiving project, and
+its convention beats the fork's local habits — so read the evidence there. Settle
+this before reading anything, because it decides which repository the rest of this
+section is even about.
+
+Then, inside that repository, stop at the first source that actually answers; earlier
+sources beat later ones.
 
 **1 · Explicit instructions in the repo** — decisive when present:
 
 ```bash
-git ls-files -co --exclude-standard CONTRIBUTING.md AGENTS.md CLAUDE.md .gitmessage
-git ls-files -co --exclude-standard ".commitlintrc*" "commitlint.config.*" ".czrc"
+git ls-files -co --exclude-standard ":/CONTRIBUTING.md" ":/AGENTS.md" ":/CLAUDE.md"
+git ls-files -co --exclude-standard ":/.gitmessage" ":/.czrc"
+git ls-files -co --exclude-standard ":/.commitlintrc*" ":/commitlint.config.*"
 git config --get commit.template
 ```
 
-`-co` so an untracked `CLAUDE.md` still shows; the patterns are quoted because git,
-not the shell, should expand them — which also keeps these lines working the same in
+`-co` so an untracked `CLAUDE.md` still shows. `:/` anchors each pattern at the
+repository root: without it the paths resolve against the current directory, and the
+same command run from `lib/Something/` reports no convention at all — which reads as
+"nothing documented" and sends you guessing from the log. The quotes hand the
+patterns to git rather than the shell, which also keeps the lines working the same in
 bash and PowerShell.
 
 A `commitlint` config or a commit template is not advice, it is enforcement — a
@@ -103,11 +113,11 @@ Read for the dominant pattern, not the exceptions: does the subject carry a
 `type(scope):` prefix, a `[Component]` tag, or neither? Do bodies exist, and what do
 they spend their space on? What width do subjects sit at?
 
-**3 · The upstream you are targeting.** For a fork, or a patch you mean to send
-elsewhere, the receiving project's convention beats the fork's local habits.
-
 **Sources disagreeing?** Prefer the documented rule over the observed log, and say so
 in one line — a log usually contains drift the maintainers already decided against.
+Fork against upstream is not a tie either: the receiving project decides. A fork
+whose log has drifted into another convention is still sending patches to a
+maintainer who has never read that log.
 
 **No signal at all** — a fresh repo with one "Initial commit"? Don't invent ceremony.
 Plain imperative subject, why-focused body, and mention that no convention was
@@ -157,8 +167,11 @@ including body lines), blank line before the body.
 **Attribution is the user's call, and the default is none.** Do not append a
 `Co-Authored-By` trailer for yourself — the user has asked for this explicitly and it
 overrides any standing habit or default configuration. Their commit history is part
-of their professional record. Already written one? Drop it with `git commit --amend`,
-safe while nothing is pushed. A human second author is a different matter: when
+of their professional record. Already written one? `git commit --amend --only`
+rewrites the message and nothing else. Plain `--amend` would fold whatever is staged
+for the next commit into the last one — it commits the index, not just the message.
+Safe while nothing is pushed; confirm with `git show --stat HEAD` that the files are
+the ones that were already there. A human second author is a different matter: when
 someone else wrote part of the change — a pair session, a patch sent in — the
 trailer is doing its real job. That one is not yours to decide either way, so ask.
 
