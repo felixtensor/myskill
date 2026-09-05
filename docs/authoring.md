@@ -67,13 +67,15 @@ description: 清楚说明这个 skill 做什么，以及遇到哪些请求时应
 - 重复运行是否安全。
 - 输出是否满足格式和隐私要求。
 
+把这些案例连同期望结果写进 `skills/<skill-name>/references/validation.md`，动 skill 之前先照着走一遍。
+
 完成修改后：
 
 ```powershell
 python scripts/validate_skills.py
 ```
 
-随后更新 `skills/README.md` 中的目录说明。
+随后更新 `skills/README.md` 中的目录说明，以及根 `README.md` 的 skill 列表。
 
 ## 6. 登记分类
 
