@@ -13,8 +13,7 @@ skills/
 | Skill | 用途 | 分类 |
 | --- | --- | --- |
 | [`commit-style`](commit-style/) | 先读出仓库自己的提交约定，再照着写 commit message | `effective`、`work` |
-
-下一个候选是“周报提交”工作流；在确定触发条件、输入来源、产出格式和提交动作后再创建目录。
+| [`feishu-weekly-report`](feishu-weekly-report/) | 结合仓库及飞书、Notion、本地和在线文档，在实际审批页面填写与反复 review；按页面能力保存草稿，由用户提交；技能说明为英文 | `work`、`effective` |
 
 ## Categories
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Feishu Weekly Report"
+  short_description: "Fill and review Feishu weekly reports without submitting"
+  default_prompt: "Use $feishu-weekly-report to gather my weekly work, fill my live weekly-report form, and revise it with my feedback while leaving submission to me."
