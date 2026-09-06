@@ -24,6 +24,9 @@
         "effective",
         "work"
       ]
+    },
+    "feishu-weekly-report": {
+      "categories": ["work", "effective"]
     }
   }
 }
