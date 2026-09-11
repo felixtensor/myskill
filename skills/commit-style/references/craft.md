@@ -20,7 +20,7 @@ and "why it had to change" is the message.
 
 ## Problem first, then the fix
 
-The structure that survives everywhere:
+When the repository does not establish another order, a strong default is:
 
 > What was wrong → why that mattered → what this change does about it.
 
@@ -42,8 +42,9 @@ three call sites." The diff says that.
 
 ## Record the roads not taken
 
-The highest-value sentence in many good commits is the one explaining a rejected
-alternative — because that is precisely the reasoning that evaporates.
+The highest-value sentence in many good commits can be the one explaining a rejected
+alternative — when that alternative was actually considered and the reasoning would
+otherwise evaporate.
 
 > A null guard inside getUser would have been smaller, but it hides the same
 > confusion at the other two call sites instead of resolving it.

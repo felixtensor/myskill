@@ -12,7 +12,7 @@ skills/
 
 | Skill | 用途 | 分类 |
 | --- | --- | --- |
-| [`commit-style`](commit-style/) | 先读出仓库自己的提交约定，再照着写 commit message | `effective`、`work` |
+| [`commit-style`](commit-style/) | 从成文规则与 history 逐维读出完整 commit message 风格，再据此撰写 | `effective`、`work` |
 | [`feishu-weekly-report`](feishu-weekly-report/) | 结合仓库及飞书、Notion、本地和在线文档，在实际审批页面填写与反复 review；按页面能力保存草稿，由用户提交；技能说明为英文 | `work`、`effective` |
 
 ## Categories
