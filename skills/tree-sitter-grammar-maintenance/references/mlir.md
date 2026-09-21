@@ -13,32 +13,40 @@ repository first — this file tells you how to *use* it, not what it says.
 | Query fixtures | `test/highlight/<layer>/*.mlir`, indexed by `test/highlight-fixtures.md` |
 | Compatibility smoke | `examples/`, pinned by `examples/SOURCE.md` |
 | Grammar / scanner | `grammar.js`, `src/scanner.c` |
-| Roadmap and complexity budget | `tmp/DEVELOPMENT-PLAN.md` |
+| Roadmap and complexity budget | a development plan document, if the project keeps one — see below |
 
 ## Which document governs what
-
-Two documents carry authority here, and confusing them causes real mistakes.
 
 **`docs/ARCHITECTURE.md` is the contract.** It says what the parser promises about
 tree shape: the public AST surface, the layer split, the six principles, the
 declared conflicts, the scanner's responsibilities. It is the standard a finding is
 judged against, it has no expiry, and its principles are not editable to fit a
-patch.
+patch. It is tracked, so everyone working on the repository has it.
 
-**`tmp/DEVELOPMENT-PLAN.md` is the roadmap and the process.** It says how work is
-chosen, what evidence a change owes, which gates block, what was deliberately
-*not* built and why, and what the complexity budget is. It expires: it covers v0.2.0
-through v0.3.x and will be replaced.
+**A development plan, if one exists, is the roadmap and the process.** It says how
+work is chosen, what evidence a change owes, which gates block, what was
+deliberately *not* built and why, and what the complexity budget is. Unlike the
+contract it expires, and it may be a maintainer's local working document rather
+than a tracked file — so look for it rather than assuming a path:
 
-So: **adjudicate against ARCHITECTURE.md; work according to the plan.** When the
-plan and the contract seem to disagree about tree shape, the contract wins and the
-plan is stale. When they disagree about process, the plan wins. If the two really
-conflict on substance, that is a finding in itself — report it rather than picking
-one quietly.
+```bash
+find . -maxdepth 3 -iname 'DEVELOPMENT[-_]PLAN.md' -not -path './node_modules/*'
+```
 
-The plan's §2.3 and §4.2 are worth reading before proposing any tooling: they list,
-with reasons, the review machinery this project built once and removed. Do not
-re-propose it.
+If it turns up, read it before proposing any tooling or any change to the gates:
+such documents usually record machinery the project already tried and removed, and
+re-proposing it wastes the maintainer's time. If it does not turn up, work from the
+contract alone and do not invent a process — ask the maintainer what the current
+priorities are instead.
+
+**So: adjudicate against the contract; work according to the plan.** When the two
+seem to disagree about tree shape, the contract wins and the plan is stale. When
+they disagree about process, the plan wins. If they genuinely conflict on substance,
+that is a finding in itself — report it rather than quietly picking one.
+
+Treat an untracked plan as the maintainer's own notes. Do not quote its contents
+into a commit message, a PR description or anything else that leaves the machine;
+cite the contract for that, or restate the reasoning in your own words.
 
 ## Gates
 
