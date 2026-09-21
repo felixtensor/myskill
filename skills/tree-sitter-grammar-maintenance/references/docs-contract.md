@@ -37,3 +37,40 @@ maintenance. Editing a principle so a patch becomes acceptable is not maintenanc
 and is not yours to do.
 
 ---
+
+## Before you "fix" a documented claim
+
+A claim that does not match the code is a finding. It is **not** automatically a
+defect, and the repair is **not** automatically the obvious one. Separate three
+cases before touching anything:
+
+- **Stale** — a count or a name drifted as the code moved. Update the document.
+  This is the common case and needs no discussion.
+- **Intentional** — the entry records what the maintainer reserves or intends, not
+  what the code currently emits. A standard capture listed in a vocabulary but not
+  yet used is the archetype. Deleting it erases intent. Leave it, or raise it.
+- **Ambiguous wording** — the list is accurate under one reading of the sentence
+  above it and wrong under another. Then the sentence is the defect, not the list,
+  and rewording is the smaller and more honest change.
+
+When it is not clearly stale, say what you found and let the maintainer decide.
+Deleting an entry and sharpening a sentence are different claims about intent, and
+only one of them is yours to make.
+
+## Do not manufacture work
+
+If a pass turns up nothing, **the finding is that it turned up nothing** — write
+that down and stop. The temptation is strongest at the end of an audit that has
+found only one big problem you cannot finish: something small and completable looks
+like a way to show progress. It is not. A change made to have made a change costs
+the maintainer a review, puts churn in the history, and teaches them to distrust the
+next finding, which may be real.
+
+Every change needs a reason that would stand on its own if someone asked six months
+later — a reader who is misled, a consumer that breaks, a claim that is false. "It
+was inconsistent" is only a reason once you have established which of the three
+cases above it is, and that the inconsistency actually costs someone something.
+
+A pass whose honest output is "all gates green, three invariants clean, one known
+defect still open, no new findings" is a complete pass and a useful record. Say it
+plainly rather than padding it.
