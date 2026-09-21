@@ -47,7 +47,7 @@ is worse than not having it.
 ## Then
 
 Add the repository and its contract document to the table in `SKILL.md` Part 0, and
-start an audit record at `tmp/AUDIT-LOG.md` as described in Part 7.
+start an audit record in an ignored directory as described in Part 7.
 
 Until a contract document exists, be explicit about what you can and cannot say: an
 ERROR/MISSING sweep and a corpus self-consistency check both work without one, and

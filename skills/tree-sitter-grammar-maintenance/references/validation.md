@@ -1,6 +1,6 @@
 # 验证案例
 
-`docs/authoring.md` §5 要求的六类案例，针对 `tree-sitter-grammar-audit`。没有自动化
+`docs/authoring.md` §5 要求的六类案例，针对 `tree-sitter-grammar-maintenance`。没有自动化
 model-eval harness；`scripts/validate_skills.py` 只检查结构，不能证明 agent 的判断正确。
 行为变更合入前，在一个真实的 parser 仓库里走相关案例，记录读过的契约条款、落层结论、
 最终建议，以及是否动过 parser 仓库的文件。这是维护材料，不是运行时指令，`SKILL.md`

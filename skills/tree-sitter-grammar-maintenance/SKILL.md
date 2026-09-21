@@ -461,10 +461,17 @@ are evidence.
 
 # Part 7 · Keep a local audit record
 
-Write one to `tmp/AUDIT-LOG.md` in the parser repository — `tmp/` is gitignored, so
-this is a local working note, not a repository asset and not a release gate. Use
-`assets/audit-log-template.md` rather than inventing a shape each time; a record the
-next pass cannot skim is a record nobody reads.
+Keep it in the parser repository but **outside version control**, so it stays a
+local working note rather than a repository asset or a release gate. Pick a
+directory the repository already ignores and confirm it before writing:
+
+```bash
+git check-ignore -v tmp/ scratch/ .local/ 2>/dev/null   # whichever the repo has
+```
+
+If nothing is ignored, ask the maintainer where such notes belong rather than
+committing one. Use `assets/audit-log-template.md` rather than inventing a shape
+each time; a record the next pass cannot skim is a record nobody reads.
 
 One entry per pass: date, branch and commit, CLI version, which probes and gates
 ran, and one line per finding with a status — `open`, `fixed in <commit>`,

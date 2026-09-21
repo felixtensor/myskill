@@ -1,7 +1,8 @@
 # Parser audit record
 
-Local working note. `tmp/` is gitignored, so this is not a repository asset and not
-a release gate. Its only job is to stop the next pass from redoing work that was
+Local working note, kept in a directory the repository ignores — confirm with
+`git check-ignore` before writing. It is not a repository asset and not a release
+gate. Its only job is to stop the next pass from redoing work that was
 already done, or re-arguing a trade-off that was already settled.
 
 Keep it short enough to read in full before starting a pass. One row per decision —
