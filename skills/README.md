@@ -14,6 +14,7 @@ skills/
 | --- | --- | --- |
 | [`commit-style`](commit-style/) | 从成文规则与 history 逐维读出完整 commit message 风格，再据此撰写 | `effective`、`work` |
 | [`feishu-weekly-report`](feishu-weekly-report/) | 结合仓库及飞书、Notion、本地和在线文档，在实际审批页面填写与反复 review；按页面能力保存草稿，由用户提交；技能说明为英文 | `work`、`effective` |
+| [`tree-sitter-grammar-maintenance`](tree-sitter-grammar-maintenance/) | 以官方 parser 为参照对比、定位、修复、验证的闭环，并把架构文档维护成判定取舍的契约；技能说明为英文 | `effective`、`work` |
 
 ## Categories
 
