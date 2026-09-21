@@ -374,6 +374,11 @@ def cmd_corpus(args):
                     lost += want - got
                     hits.append((rel, name, want, got))
         total += len(hits)
+        if n_cases == 0:
+            print(f"NONE {inv['id']}: no corpus case exercises this at all -- "
+                  f"that is a coverage gap, not a pass")
+            total += 1
+            continue
         status = "OK  " if not hits else "HIT "
         print(f"{status} {inv['id']}  (layer {inv.get('layer', '?')})  "
               f"{len(hits)}/{n_cases} case(s), {lost} missing {inv['node']}")
@@ -511,6 +516,19 @@ def cmd_skeleton(args):
 
     print(f"compared: {compared} file(s)   "
           f"not accepted by the reference tool: {rejected}")
+    if compared == 0:
+        # An empty comparison must never read as a pass. Reporting OK here is
+        # how an audit ends up green having checked nothing.
+        print(
+            "\nNOTHING WAS COMPARED. This is not a pass.\n"
+            "Every selected file was declined by the reference parser, so this\n"
+            "evidence line produced no result at all. Usual causes: the file\n"
+            "selection is too narrow (a --limit that lands only on pass\n"
+            "pipelines or expected-error tests), or the tool is from a release\n"
+            "whose dialect syntax has moved. Widen the selection, or say in the\n"
+            "report that the reference comparison did not run."
+        )
+        return 2
     if rejected:
         print("  (pass pipelines, expected-error tests and split files are "
               "outside this check by nature, not a parser signal)")

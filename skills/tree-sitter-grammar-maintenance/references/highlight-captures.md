@@ -54,11 +54,15 @@ a table someone transcribed at an unknown version.
 ## What does not age, and is worth knowing
 
 **Two captures can share a theme channel.** The default CLI theme maps several
-distinct captures onto the same colour and weight — `@constant.builtin` and
-`@number` have collided this way, as have `@constructor.builtin` and
-`@constructor`. So a query change that is a genuine semantic improvement can be
-*invisible* in the terminal, and conversely a distinction that looks fine in the
-query file may not reach the reader.
+distinct captures onto the same colour and weight, so a query change that is a
+genuine semantic improvement can be *invisible* in the terminal, and conversely a
+distinction that looks fine in the query file may not reach the reader.
+
+Observed at v0.26.10: `@constant.builtin` and `@number` were both bold brown, and
+`@constructor.builtin` had no style of its own and fell back to `@constructor`.
+Those specific pairs may have changed since — that is the point of this file, so
+check rather than quote them. The theme is one `match` block in
+`crates/cli/src/highlight.rs`, linked above; read it at your version.
 
 The consequence for this skill: **do not claim a highlighting improvement on the
 strength of the query diff alone.** Render the fixture and look, or say plainly that
