@@ -156,22 +156,36 @@ MLIR ships its own parser. Prefer it over any pattern you would write yourself: 
 regex that guesses which lines bind SSA results is a crude re-implementation of the
 thing sitting on disk, and it will be wrong in ways you cannot enumerate.
 
-### Finding the tool
+### The tool is declared, not discovered
 
-`mlir-opt` is required for this line of evidence, and it is the strongest one
-available, so **never skip it silently**. If it is not on `PATH`, look in the usual
-places and then *ask the user where it is* rather than falling back to weaker checks
-without saying so:
+`mlir-opt` is required for this line of evidence and it is the strongest one
+available, so **never skip it silently** — and never go looking for it either.
+
+Searching is the trap. `opt` on `PATH` is LLVM's IR optimiser, not an MLIR tool.
+A stray `mlir-opt` from an unrelated build may not register the dialects these
+examples use. Both would yield numbers that look authoritative while resting on a
+binary nobody chose, which destroys the one property that makes this evidence worth
+more than a hand-written pattern: you know what produced it.
+
+So the user declares it, and `probe.py` verifies the declaration by round-tripping
+a trivial function through it before trusting anything:
 
 ```bash
-command -v mlir-opt || ls ~/Projects/llvm-install/bin/mlir-opt /usr/local/bin/mlir-opt 2>/dev/null
+python3 scripts/probe.py skeleton --repo "$REPO" \
+  --spec assets/invariants/mlir.json --tool /path/to/mlir-opt --verbose-tool
 ```
 
-Any build of `mlir-opt`, or a downstream project's own `*-opt`, works. **Do not
-check its version against the `examples/SOURCE.md` anchor and do not refuse to run
-because they differ.** A version difference shows up as files the tool rejects —
-dialect syntax that moved between releases — which is a coverage limit, not a parser
-signal and not a false hit. Report the version you used and move on.
+`--verbose-tool` prints the resolved path, which belongs in the audit record so the
+next pass can reuse it instead of asking again.
+
+Any MLIR-based project's opt tool serves: `mlir-opt`, `circt-opt`, `triton-opt`,
+`iree-opt`, `tpp-opt`. They all parse core MLIR and print generic form, which is the
+only part this comparison uses; a downstream one additionally registers its own
+dialects, which raises how many files it accepts. **Do not check its version against
+the `examples/SOURCE.md` anchor and do not refuse to run because they differ.** A
+version difference shows up as files the tool rejects — dialect syntax that moved
+between releases — which is a coverage limit, not a parser signal and not a false
+hit. Report the version you used and move on.
 
 ### Why comparing against it works at all
 
@@ -221,7 +235,7 @@ place — the two lines of evidence cover different halves.
 ```bash
 python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json
 python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json \
-  --tool ~/Projects/llvm-install/bin/mlir-opt --limit 60
+  --tool /path/to/mlir-opt --limit 60
 ```
 
 ### What is comparable, and what is not

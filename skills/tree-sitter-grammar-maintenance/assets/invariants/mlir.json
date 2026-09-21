@@ -89,6 +89,9 @@
         "compare": "informational",
         "why": "generic form materializes entry block labels the custom form omits"
       }
-    ]
+    ],
+    "also_accept_why": "Any MLIR-based project's opt tool parses core MLIR and prints generic form, so any of them serves as the reference for the shared syntax. A downstream one additionally registers its own dialects, which raises how many files it accepts. Order is preference, not requirement; --tool overrides all of them.",
+    "tool_is_declared_not_discovered": "The reference parser is never searched for. `opt` on PATH is LLVM's IR optimiser, not an MLIR tool, and an arbitrary mlir-opt build may not register the dialects this repository needs -- either would yield a comparison that looks authoritative while resting on a binary nobody chose. The user declares it with --tool; probe.py then round-trips a trivial function through it and refuses if that fails.",
+    "accepted_tools_for_reference": "Any MLIR-based project's opt tool: mlir-opt, circt-opt, triton-opt, iree-opt, tpp-opt and so on. They all parse core MLIR and print generic form, which is the only part this comparison uses; a downstream one also registers its own dialects, which raises how many files it accepts."
   }
 }

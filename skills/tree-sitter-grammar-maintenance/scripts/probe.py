@@ -420,19 +420,50 @@ def cmd_skeleton(args):
     repo = os.path.abspath(args.repo)
     cli = spec.get("cli", ["npx", "--no-install", "tree-sitter"])
     command = list(norm["command"])
-    if args.tool:
-        command[0] = args.tool
-    tool = shutil.which(command[0])
-    if tool is None:
+    # Deliberately no discovery. Searching PATH can land on LLVM's `opt`, which
+    # is a different tool entirely, or on a build that does not register the
+    # dialects this repository needs -- and either produces confident-looking
+    # output whose provenance nobody checked. The user declares the tool; if
+    # they have not, stop and ask.
+    if not args.tool:
         raise SystemExit(
-            f"reference parser '{command[0]}' not found on PATH.\n"
-            "This check is the strongest evidence available, so do not skip it\n"
-            "silently -- ask the user where the tool lives and pass it:\n"
-            f"    --tool /path/to/{os.path.basename(command[0])}\n"
-            "Its version does not need to match the pinned examples; a version\n"
-            "difference shows up as files the tool rejects, not as false hits."
+            "no reference parser declared.\n"
+            "Do NOT search for one: `opt` is LLVM's IR optimiser, not an MLIR\n"
+            "tool, and an arbitrary build may not register the dialects this\n"
+            "repository needs. Either way the comparison would look\n"
+            "authoritative while resting on a binary nobody chose.\n\n"
+            "Ask the user which tool to use, then pass it:\n"
+            "    --tool /path/to/mlir-opt\n"
+            "Any MLIR-based project's opt tool works (mlir-opt, circt-opt,\n"
+            "triton-opt, iree-opt ...). Version need not match the pinned\n"
+            "examples. Record the path in the audit record so the next pass\n"
+            "does not have to ask again."
+        )
+    tool = args.tool
+    if not (os.path.isfile(tool) and os.access(tool, os.X_OK)):
+        found = shutil.which(tool)
+        if found is None:
+            raise SystemExit(
+                f"declared reference parser is not executable: {tool}\n"
+                "Confirm the path with the user rather than substituting another."
+            )
+        tool = found
+    # Confirm the declared tool really is an MLIR-style opt before trusting it.
+    probe_src = "func.func @__probe__() { return }\n"
+    check = subprocess.run([tool] + command[1:] + ["-"],
+                           input=probe_src, capture_output=True, text=True)
+    if check.returncode != 0 or '"func.func"' not in check.stdout:
+        raise SystemExit(
+            f"{tool} did not round-trip a trivial MLIR function to generic "
+            "form.\n"
+            "It is probably not an MLIR opt tool -- LLVM's `opt` and a Clang\n"
+            "driver both fail here. Ask the user for the right one; do not\n"
+            "fall back to searching.\n"
+            f"stderr: {check.stderr.strip()[:200]}"
         )
     command[0] = tool
+    if args.verbose_tool:
+        print(f"reference parser: {tool}\n")
 
     files = resolve_files(repo, args.files or spec["files"])
     if args.limit:
@@ -630,7 +661,9 @@ def main(argv=None):
         "skeleton",
         help="compare the grammar against the language's reference parser")
     common(p)
-    p.add_argument("--tool", help="override the normalizer executable")
+    p.add_argument("--tool", help="path to the reference parser to use")
+    p.add_argument("--verbose-tool", action="store_true",
+                   help="print which reference parser was resolved")
     p.add_argument("--limit", type=int, help="only the first N files")
     p.add_argument("--show", type=int, default=10)
     p.set_defaults(func=cmd_skeleton)
