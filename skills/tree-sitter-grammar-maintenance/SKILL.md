@@ -61,6 +61,10 @@ CI builds.
 Then go round again: a fix changes what the next comparison shows, and the residue
 after a fix is the next lead.
 
+`references/highlight-captures.md` covers the query side: how to derive the standard
+capture set from the toolchain instead of trusting a copied list, and why a query
+improvement can be invisible in a rendered fixture.
+
 `references/tree-sitter-mechanics.md` holds the mechanics that decide which grammar
 edit can possibly work — the precedence and conflict rules, how to see anonymous
 tokens, corpus test attributes, and the test-repair order. Read it before editing a
@@ -345,6 +349,13 @@ payload's boundary is not.** Anything on the public AST surface is stable core b
 definition — check the list rather than assuming a node is peripheral. Record every
 verdict in the audit record, including the ones you decide *not* to act on.
 `references/mlir.md` works two examples end to end, one must-fix and one accepted.
+
+**A pass that finds nothing is a finished pass.** Do not reach for a small
+completable change to show progress — a fix made to have made a fix costs a review,
+adds churn, and spends the credibility the next real finding will need. Every change
+needs a reason that stands on its own: a reader misled, a consumer broken, a claim
+that is false. "It was inconsistent" only becomes a reason once you have shown the
+inconsistency costs someone something, and that it is not deliberate.
 
 ---
 

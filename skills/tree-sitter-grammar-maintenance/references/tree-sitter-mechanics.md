@@ -18,10 +18,12 @@ simply does nothing.
 
 ### The rule that costs the most time
 
-From the grammar DSL reference: `prec.dynamic`'s precedence "is applied at *runtime*
-instead of at parser generation time", and it "is only necessary when handling a
-conflict dynamically using the `conflicts` field in the grammar, and when there is a
-genuine *ambiguity*".
+From the [grammar DSL reference][dsl]: `prec.dynamic`'s precedence "is applied at
+*runtime* instead of at parser generation time", and it "is only necessary when
+handling a conflict dynamically using the `conflicts` field in the grammar, and when
+there is a genuine *ambiguity*".
+
+[dsl]: https://tree-sitter.github.io/tree-sitter/creating-parsers/2-the-grammar-dsl.html
 
 So:
 
@@ -129,3 +131,23 @@ with the reference tool, parse the tool's output with the same grammar, and comp
 skeletons. Both sides are then CSTs produced by the same parser, so the comparison
 needs no mapping layer — and the reference side encodes the language's own answer
 rather than your guess at it.
+
+## Sources
+
+Check these rather than trusting the summary above, which was written against one
+version and will age:
+
+- Grammar DSL — `prec`, `prec.dynamic`, `conflicts`, `token`:
+  <https://tree-sitter.github.io/tree-sitter/creating-parsers/2-the-grammar-dsl.html>
+- Writing the grammar — conflicts and the GLR rationale:
+  <https://tree-sitter.github.io/tree-sitter/creating-parsers/3-writing-the-grammar.html>
+- Writing tests — corpus format and attributes:
+  <https://tree-sitter.github.io/tree-sitter/creating-parsers/5-writing-tests.html>
+- The CLI's own help is the authority on flags, which move between releases:
+  `npx tree-sitter parse --help`, `test --help`, `generate --help`, `fuzz --help`
+
+Tree-sitter's documentation does not describe every behaviour that matters — the
+interaction between `prec.right` on a `repeat` and a permissive body rule is not
+written down anywhere, and was established here by experiment. Where this file
+states something the docs do not, treat it as a finding reproduced in this
+repository rather than as an upstream guarantee.
