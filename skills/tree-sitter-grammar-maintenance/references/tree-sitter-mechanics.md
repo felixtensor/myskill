@@ -98,9 +98,12 @@ invisible.
 Run one case by name:
 
 ```bash
-npx tree-sitter test -i 'exact test name'
+npx tree-sitter test -i 'a regex, not a literal name'
 npx tree-sitter test --file-name 14-custom-assembly.txt
 ```
+
+`-i` matches names by **regular expression**, so `.` and `(` in a test name are
+metacharacters. Anchor or escape when a name would otherwise match several cases.
 
 ## Repairing tests after a grammar change
 
