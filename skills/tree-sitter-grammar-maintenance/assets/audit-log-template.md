@@ -19,7 +19,8 @@ Status values: `open` · `fixed in <commit>` · `accepted` (with the reason) ·
 - **Branch / commit:** `<branch>` @ `<short sha>`
 - **CLI version:** `<npx tree-sitter --version>`, lock says `<locked version>`
 - **Generated parser:** regenerates identically / was stale, regenerated
-- **Reference compiler:** not used / `<tool> <version or source anchor>`
+- **Reference parser:** not used / `<absolute path>` `<version>` — record the
+  path so the next pass does not have to ask for it again
 - **Gates at baseline:** `npm run test` <result> · `npm run test:examples` <result>
 
 ### Probes run

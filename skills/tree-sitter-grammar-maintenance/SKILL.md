@@ -44,8 +44,8 @@ Compare, locate, fix, verify, repeat. Each step is expanded below; do not skip
 Part 0, because every later number is meaningless if the toolchain is not the one
 CI builds.
 
-1. Load the contract and the audit record; verify the toolchain; find the reference
-   parser (Part 0).
+1. Load the contract and the audit record; verify the toolchain; get the reference
+   parser from the user or the record — never by searching (Part 0).
 2. Record the baseline the project's own gates report (Part 0).
 3. **Compare against the reference parser** — the strongest evidence, and the first
    thing to run for a language that has one (Part 3).
@@ -93,18 +93,35 @@ examples — one must-fix, one accepted trade-off. Read it whenever you are work
 in `tree-sitter-mlir`, not only when stuck. A repository with no contract document
 cannot be adjudicated at all — see `references/onboarding.md`.
 
-**Locate the reference parser.** For a language whose compiler can re-print the
-program, this is the strongest evidence available, so find it before you start:
+**The reference parser is declared by the user, never discovered.** Do not search
+`PATH`, do not try a list of likely names, do not take the first plausible binary.
+`opt` is LLVM's IR optimiser and has nothing to do with MLIR; an arbitrary
+`mlir-opt` build may not register the dialects this repository needs. Either would
+produce a comparison that reads as authoritative while resting on a binary nobody
+chose — and the whole value of this evidence line is that its provenance is known.
 
-```bash
-command -v mlir-opt || ls ~/Projects/llvm-install/bin/mlir-opt 2>/dev/null
-```
+Resolve it in this order:
 
-If it is not there, **ask the user where it is** and pass the path with `--tool`.
-Do not quietly fall back to the weaker checks — say that you are running without it
-and that coverage is reduced. Its version does **not** need to match the pinned
-examples, and you should not check: a version difference surfaces as files the tool
-declines to process, which is a coverage limit, not a parser signal.
+1. **The user said so in this session** — use that path.
+2. **The audit record has it** — a previous pass recorded the path; reuse it.
+3. **Otherwise ask, and wait.** Ask however the client allows: its question or
+   option-picker mechanism where one exists, plain text otherwise. One line is
+   enough — which opt tool to use and where it is; any MLIR-based project's build
+   works (`mlir-opt`, `circt-opt`, `triton-opt`, `iree-opt` …); the version does not
+   need to match the pinned examples.
+
+Pass it with `--tool`. `probe.py` round-trips a trivial function through whatever it
+is given and refuses anything that is not an MLIR opt tool, so a wrong answer fails
+loudly instead of quietly. Record the working path in the audit record so the next
+pass does not ask again.
+
+**If the user has none**, continue with the remaining checks and **say in the report
+that the reference comparison did not run and coverage is reduced**. That is a fine
+outcome; presenting it as a complete audit is not.
+
+Its version does **not** need to match the pinned examples, and you should not
+check: a version difference surfaces as files the tool declines to process, which
+is a coverage limit, not a parser signal.
 
 **Read the audit record next** (Part 7). It tells you which invariants were already
 clean, which findings are already open, and — most importantly — which findings
@@ -313,20 +330,17 @@ A census is a scratch measurement for one change. Write it to a temporary path,
 never into the repository — a committed baseline is the persistent snapshot the
 project has already decided not to maintain.
 
-**Using a reference compiler, when one is installed.** It is optional; the audit
-runs without it. It answers exactly two questions, and no others:
+**The reference parser also answers one question the skeleton check does not:**
+whether an input is legal at all.
 
 ```bash
-mlir-opt --verify-diagnostics FILE                   # is this input even legal?
-mlir-opt --mlir-print-op-generic FILE > /tmp/gen.mlir # normalize to generic form
+mlir-opt --verify-diagnostics FILE
 ```
 
-The second is the valuable one. Generic form is the language's stable, fully
-specified core syntax, and the contract commits to parsing it precisely. A defect
-found on generic form needs no dialect knowledge to adjudicate — it is
-unambiguously a parser bug. Never diff the compiler's IR against the CST: that
-comparison requires a mapping layer that would itself need verifying. Record the
-exact command and the tool version or source anchor wherever you cite its output.
+Run it before blaming the grammar for failing on something, and before building a
+corpus case out of syntax you wrote by hand — a case whose input the language itself
+rejects is not evidence of anything. Record the command and the tool version
+wherever you cite its output.
 
 ---
 
@@ -514,19 +528,18 @@ Editing a principle so a patch becomes acceptable is not, and is not yours to do
 
 # Part 9 · Boundaries
 
-Say so plainly if you are asked for any of these, and offer the bounded alternative:
+Some things are deliberately out of scope, and being asked for them is common enough
+that the answer should be ready. No persistent review ledger, AST manifest or
+classification registry; no per-file AST notarization of the example set; no
+resident reference-compiler oracle and no CST-to-IR mapping layer; no permanent
+tooling, report or baseline left inside the parser repository; no amendment to the
+contract's principles to make a change land; no grammar change without a
+hand-written, human-read corpus case; and no dedicated rule justified by dialect
+coverage alone.
 
-- **No persistent review ledger, AST manifest, attestation or classification
-  registry.** These were built once and audited out: they did not reduce the
-  human judgement required, and they made ordinary fixes wait on a data platform.
-- **No per-file AST notarization of the example set.** Examples are smoke.
-- **No resident reference-compiler oracle**, and no CST-to-IR mapping layer.
-- **No permanent tooling, report or baseline inside the parser repository.**
-  Everything here runs from this skill; only the gitignored audit record stays.
-- **No amendments to the contract's principles** to make a change land.
-- **No grammar change without a minimal corpus case** whose expected tree was
-  written by hand and read by a person.
-- **No dedicated rule justified by dialect coverage alone.**
+`references/boundaries.md` says why each one was rejected — several were built once
+in this project's history and removed — so that a refusal comes with a reason and a
+bounded alternative rather than a flat no.
 
 If an audit keeps demanding more infrastructure to reach a conclusion, the audit is
 scoped wrong. Narrow it to one construct, one invariant, one reproducer.
