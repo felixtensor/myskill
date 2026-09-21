@@ -1,0 +1,94 @@
+{
+  "language": "mlir",
+  "repo": "tree-sitter-mlir",
+  "contract": "docs/ARCHITECTURE.md",
+  "files": [
+    "examples/**/*.mlir"
+  ],
+  "corpus_files": [
+    "test/corpus/*.txt"
+  ],
+  "skip_line": "^\\s*//",
+  "corpus_invariants": [
+    {
+      "id": "corpus-op-result",
+      "kind": "corpus_balance",
+      "layer": 1,
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)",
+      "node": "op_result",
+      "why": "The corpus is the persistent AST contract, so a defect recorded there as the expected result is invisible to every gate at once. A case whose expected tree holds fewer op_result nodes than its input has binding lines was accepted from --update without being read. The count is conservative: one line may bind several results."
+    }
+  ],
+  "invariants": [
+    {
+      "id": "no-error-node",
+      "kind": "no_node",
+      "layer": 1,
+      "node": [
+        "ERROR",
+        "MISSING",
+        "UNEXPECTED"
+      ],
+      "why": "The blocking examples gate already covers this. The probe adds the location, so a failure is actionable without re-parsing by hand."
+    },
+    {
+      "id": "op-result-binding",
+      "kind": "line_produces",
+      "layer": 1,
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)",
+      "node": "op_result",
+      "why": "op_result is on the Public AST Surface. A line that binds SSA results must produce the binding node; if it does not, the result definition was either dropped or re-attributed to a neighbouring operation, and every def-use consumer is wrong there."
+    },
+    {
+      "id": "block-label",
+      "kind": "line_produces",
+      "layer": 1,
+      "line": "^\\s*\\^[A-Za-z0-9_$.\\-]+\\s*(\\(.*\\))?\\s*:",
+      "node": "block_label",
+      "why": "Distinguishing a block label from a successor reference is the external scanner's stated job. A line-initial label that yields no block_label node means the scanner lost the distinction and the block structure collapsed."
+    },
+    {
+      "id": "custom-body-boundary",
+      "kind": "span_guard",
+      "layer": 2,
+      "node": "custom_operation",
+      "allow_if_child": [
+        "region"
+      ],
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)",
+      "why": "Principle 4, boundary-preserving, in machine-checkable form. A region-less custom operation body may be parsed coarsely, but it must not extend across a line that binds a new SSA result: that line belongs to the next operation. Deliberately narrow -- it only fires on result bindings, which are unambiguous operation starts."
+    }
+  ],
+  "normalizer": {
+    "command": [
+      "mlir-opt",
+      "--allow-unregistered-dialect",
+      "--mlir-print-op-generic",
+      "--split-input-file"
+    ],
+    "why": "Generic form is MLIR's own answer to the program's structure. The grammar parses generic form precisely (principle 2), so parsing mlir-opt's output with the same grammar turns an IR-versus-CST comparison into CST-versus-CST, where the mapping is the identity. --split-input-file raises coverage from 99/150 to 126/150 because the upstream tests are full of `// -----` chunks. --no-implicit-module was measured and rejected: it drops coverage to 52/150.",
+    "counts": [
+      {
+        "node": "op_result",
+        "compare": "ranked",
+        "why": "The strongest signal available. Grammar > reference is always a defect: the grammar invented a binding MLIR does not see. Grammar < reference with a large gap is a strong bug signal.",
+        "caveat": "MLIR allows an operation's results to go unnamed and the printer then invents a name, so the reference side can legitimately hold a few more. A gap of one or two is usually that, not a defect -- confirm before reporting. This is a ranked lead generator, not a pass/fail gate."
+      },
+      {
+        "node": "operation",
+        "compare": "informational",
+        "why": "implicit builtin.module wrapper"
+      },
+      {
+        "node": "region",
+        "compare": "informational",
+        "why": "same wrapper"
+      },
+      {
+        "node": "block",
+        "compare": "informational",
+        "why": "generic form materializes entry block labels the custom form omits"
+      }
+    ]
+  }
+}
