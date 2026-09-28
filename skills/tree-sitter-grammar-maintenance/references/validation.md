@@ -80,7 +80,11 @@
   仍然跑不起来，补装 release 二进制之前再问一次，并说明下载地址。
 - **仓库没有 `package-lock.json`**（`tree-sitter-tablegen` 当前如此）—— `provenance` 会报告
   `package.json` 里声明的版本范围。写明实际测量用的版本，并说明 CI 取的是该范围内的最新版。
-- **`npx` 无法联网** —— 用仓库内已安装的 CLI，不要静默换版本。
+- **`npx` 无法联网** —— 用仓库内已安装的 CLI，不要静默换版本。`probe.py` 本来就优先直接调用
+  `node_modules/.bin/tree-sitter`，只有找不到时才退回 npx。
+- **在 Windows 上运行** —— CLI 和工具都通过 `shutil.which` 查找，能找到 npm 装的 `.cmd` 包装；
+  工具输出一律按 UTF-8 解码，不走系统代码页。测试里的假工具在 Windows 上是 `.cmd` 包装加 Python
+  脚本，CI 在 Linux 和 Windows 上都跑。
 - **`src/` 与 `grammar.js` 不一致** —— 在重新生成的 parser 上测量，报告里说明 `src/` 已经
   偏离提交；不要在过时的产物上下结论。
 - **`probe.py` 报 parse 输出对不上、有无法识别的行，或同一文件出现两棵树** —— 以 2 退出是
@@ -139,6 +143,7 @@ python3 scripts/test_probe.py
 | 命中按 mode 聚类，示例先覆盖不同文件 | 一个缺陷的上万条命中被当成上万个问题 |
 | 多进程解析与单进程的结果、顺序完全相同；迭代版 `walk` 与递归版顺序一致 | 并行后命中顺序或计数悄悄变了，前后两次运行没法比 |
 | 优先直接调用仓库的 `node_modules/.bin/tree-sitter`，找不到才退回 npx；spec 指定的 `cli` 优先 | 每批解析都多花 0.3 秒启动 npm |
+| 工具输出按 UTF-8 解码；skill 摘要不受 CRLF 检出影响 | Windows 上带非 ASCII 字符串属性的文件解码出错；同一个提交在两个平台上摘要不同 |
 | census 在计数相同、形状不同时仍然报告 | span 或父节点变了的改动被报告成 inert |
 | `--limit` 均匀抽样；声明的工具必须通过 spec 的自检；没声明时拒绝运行；一个文件都没比较时以 2 退出 | 只抽到少数几个目录；在一个没人选过的二进制上得出看似权威的数字；什么都没比较却报告通过 |
 | `provenance` 标出 CLI 与锁文件不一致，没有锁文件时说明版本范围 | 在 CI 不会构建的 parser 上测量 |

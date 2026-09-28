@@ -303,9 +303,18 @@ def call(argv):
 
 
 def python_tool(directory, name, source):
-    """An executable that runs `source` with this interpreter."""
-    return write(os.path.join(directory, name),
-                 f"#!{sys.executable}\n{source}", executable=True)
+    """An executable that runs `source` with this interpreter.
+
+    A script with a shebang on POSIX; on Windows, which has no shebangs, the
+    script plus a `.cmd` shim -- the same shape npm installs -- returned as
+    the thing to run.
+    """
+    if os.name != "nt":
+        return write(os.path.join(directory, name),
+                     f"#!{sys.executable}\n{source}", executable=True)
+    script = write(os.path.join(directory, name + ".py"), source)
+    return write(os.path.join(directory, name + ".cmd"),
+                 f'@"{sys.executable}" "{script}" %*\n')
 
 
 # Stands in for the tree-sitter CLI: one tree per file, one operation with an
@@ -486,13 +495,11 @@ class Skeleton(unittest.TestCase):
 
     def test_a_tool_failing_the_self_check_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            wrong = write(os.path.join(tmp, "opt"), "#!/bin/sh\necho 'define void @f()'\n",
-                          executable=True)
+            wrong = python_tool(tmp, "opt", "print('define void @f()')\n")
             with self.assertRaises(SystemExit):
                 probe.run_self_check(wrong, SPEC["normalizer"], SPEC, tmp)
-            right = write(os.path.join(tmp, "mlir-opt"),
-                          "#!/bin/sh\necho '\"func.func\"() ({}) : () -> ()'\n",
-                          executable=True)
+            right = python_tool(tmp, "mlir-opt",
+                                "print('\"func.func\"() ({}) : () -> ()')\n")
             probe.run_self_check(right, SPEC["normalizer"], SPEC, tmp)
 
     def test_a_comparison_of_nothing_is_not_a_pass(self):
@@ -500,10 +507,11 @@ class Skeleton(unittest.TestCase):
             os.makedirs(os.path.join(tmp, "examples"))
             write(os.path.join(tmp, "examples", "pipeline.mlir"), "// RUN: a pass pipeline\n")
             # Passes the self-check, then declines every real input.
-            tool = write(os.path.join(tmp, "mlir-opt"), (
-                "#!/bin/sh\n"
-                "case \"$*\" in *self-check*) echo '\"func.func\"() ({}) : () -> ()';;"
-                " *) exit 1;; esac\n"), executable=True)
+            tool = python_tool(tmp, "mlir-opt", (
+                "import sys\n"
+                "if not any('self-check' in a for a in sys.argv[1:]):\n"
+                "    sys.exit(1)\n"
+                "print('\"func.func\"() ({}) : () -> ()')\n"))
             spec = os.path.join(HERE, "..", "assets", "invariants", "mlir.json")
             status, text = call(["skeleton", "--repo", tmp, "--spec", spec, "--tool", tool])
         self.assertEqual(status, 2)
@@ -641,13 +649,38 @@ class Speed(unittest.TestCase):
             bin_dir = os.path.join(repo, "node_modules", ".bin")
             os.makedirs(bin_dir)
             local = python_tool(bin_dir, "tree-sitter", "print('tree-sitter 0.27.0')\n")
-            self.assertEqual(probe.resolve_cli({}, repo), [local])
+            [found] = probe.resolve_cli({}, repo)
+            self.assertEqual(os.path.normcase(found), os.path.normcase(local))
 
     def test_npx_is_the_fallback_and_a_spec_cli_wins(self):
         with tempfile.TemporaryDirectory() as repo:
             self.assertEqual(probe.resolve_cli({}, repo)[1:], ["--no-install", "tree-sitter"])
             self.assertEqual(probe.resolve_cli({"cli": ["/nowhere/ts", "-q"]}, repo),
                              ["/nowhere/ts", "-q"])
+
+
+class Portability(unittest.TestCase):
+    """What differs on Windows: code pages, line endings, no shebangs."""
+
+    def test_tool_output_is_read_as_utf8(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tool = python_tool(tmp, "say", (
+                "import sys\n"
+                "sys.stdout.buffer.write('\\u00e4 \\u2192 \\u00e9'.encode('utf-8'))\n"))
+            self.assertEqual(probe._run([tool]), "\u00e4 \u2192 \u00e9")
+
+    def test_the_skill_digest_ignores_line_endings(self):
+        digests = []
+        for eol in (b"\n", b"\r\n"):
+            with tempfile.TemporaryDirectory() as tmp:
+                with open(os.path.join(tmp, "SKILL.md"), "wb") as fh:
+                    fh.write(b"one" + eol + b"two" + eol)
+                saved, probe.SKILL_DIR = probe.SKILL_DIR, tmp
+                try:
+                    digests.append(probe.skill_digest())
+                finally:
+                    probe.SKILL_DIR = saved
+        self.assertEqual(digests[0], digests[1])
 
 
 class Provenance(unittest.TestCase):
@@ -661,8 +694,7 @@ class Provenance(unittest.TestCase):
         self.tmp.cleanup()
 
     def spec_with_cli(self, version):
-        cli = write(os.path.join(self.repo, "fake-cli"),
-                    f"#!/bin/sh\necho 'tree-sitter {version}'\n", executable=True)
+        cli = python_tool(self.repo, "fake-cli", f"print('tree-sitter {version}')\n")
         return write(os.path.join(self.repo, "spec.json"), json.dumps(
             {"language": "x", "files": [], "invariants": [], "cli": [cli]}))
 
