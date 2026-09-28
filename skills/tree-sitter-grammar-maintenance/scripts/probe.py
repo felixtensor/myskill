@@ -43,6 +43,9 @@ from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAX_MODES = 10
+# Tool output is UTF-8. Left to the locale, Windows decodes it with the ANSI
+# code page and fails on the first non-ASCII string attribute.
+TEXT = {"text": True, "encoding": "utf-8", "errors": "replace"}
 
 # --------------------------------------------------------------------------
 # S-expression tree
@@ -273,7 +276,7 @@ def parse_batch(repo, cli, files):
         cli + ["parse"] + files,
         cwd=repo,
         capture_output=True,
-        text=True,
+        **TEXT,
     )
     if not proc.stdout.strip():
         raise SystemExit(
@@ -475,7 +478,7 @@ def census_entry(tree):
 def _run(cmd, cwd=None):
     """stdout of a command that succeeded, stripped; None otherwise."""
     try:
-        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, **TEXT,
                               timeout=120)
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -494,7 +497,7 @@ def tool_version(tool):
     """The line of `tool --version` that names a version, if any."""
     try:
         proc = subprocess.run([tool, "--version"], capture_output=True,
-                              text=True, timeout=60)
+                              timeout=60, **TEXT)
     except (OSError, subprocess.TimeoutExpired):
         return ""
     lines = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
@@ -541,7 +544,7 @@ def run_self_check(tool, norm, spec, tmp):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(check["input"])
     proc = subprocess.run([tool] + norm.get("args", []) + [path],
-                          capture_output=True, text=True)
+                          capture_output=True, **TEXT)
     if proc.returncode != 0 or check["expect"] not in proc.stdout:
         raise SystemExit(
             f"{tool} failed the spec's self-check: it did not normalize\n"
@@ -573,7 +576,8 @@ def locked_cli(repo):
 
 
 def skill_digest():
-    """A hash of this skill's own files, the same for a checkout or a copy."""
+    """A hash of this skill's own files: the same for a checkout or a copy,
+    whatever line endings the checkout chose."""
     h = hashlib.sha1()
     for dirpath, dirnames, filenames in os.walk(SKILL_DIR):
         dirnames[:] = sorted(d for d in dirnames
@@ -585,7 +589,7 @@ def skill_digest():
             rel = os.path.relpath(path, SKILL_DIR).replace(os.sep, "/")
             h.update(rel.encode() + b"\0")
             with open(path, "rb") as fh:
-                h.update(fh.read())
+                h.update(fh.read().replace(b"\r\n", b"\n"))
             h.update(b"\0")
     return h.hexdigest()[:12]
 
@@ -974,7 +978,7 @@ def cmd_skeleton(args):
         raise SystemExit("no files matched")
 
     def normalize(src):
-        proc = subprocess.run(command + [src], capture_output=True, text=True)
+        proc = subprocess.run(command + [src], capture_output=True, **TEXT)
         return proc.stdout if proc.returncode == 0 and proc.stdout.strip() else None
 
     rejected, compared = 0, 0
