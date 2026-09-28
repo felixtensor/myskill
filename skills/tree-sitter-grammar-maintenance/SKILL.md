@@ -242,7 +242,8 @@ gate**:
   invented structure the language's parser does not see. Open these first.
 - **grammar below the reference, large gap** — a strong signal on a `ranked`
   quantity, and the top of the list is where to look. On a `ceiling` quantity the
-  reference is expected to count more, for the reason the spec states.
+  reference is expected to count more, for the reason the spec states — which is
+  also where a swallowed operation hides, so leave those to the invariants.
 - **small gaps** — often a legitimate printing difference rather than a defect. The
   language layer documents which ones, and why a green number here would be
   meaningless.

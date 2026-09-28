@@ -57,6 +57,17 @@
       ],
       "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*%)",
       "why": "Principle 4, boundary-preserving, in machine-checkable form. A custom operation body may be parsed coarsely, but it must not extend across a line that binds a new SSA result: that line belongs to the next operation. For an operation with regions, only the rows after its last region closes are checked -- rows inside a region belong to nested operations, which are checked on their own. Deliberately narrow -- it only fires on result bindings, which are unambiguous operation starts."
+    },
+    {
+      "id": "custom-body-generic-op",
+      "kind": "span_guard",
+      "layer": 2,
+      "node": "custom_operation",
+      "check_after_last": [
+        "region"
+      ],
+      "line": "^\\s*\"[A-Za-z_][A-Za-z0-9_$.\\-]*\"\\s*\\(",
+      "why": "Principle 4 for operations that bind nothing. A line that starts with a quoted operation name and `(` is a generic operation -- unambiguous in MLIR -- so a custom body running over it has swallowed a whole operation, which then vanishes from the tree. The binding checks never look at such a line, and the skeleton's operation ceiling expects the grammar to count fewer, so nothing else reports it. Lines that bind results are left to custom-body-boundary."
     }
   ],
   "normalizer": {

@@ -89,6 +89,21 @@ The document says this directly — an `ERROR` inside one custom operation is
 preferable to a clean-looking parse that absorbs later siblings. Quote that line
 when someone proposes widening a fallback to remove an `ERROR`.
 
+How the spec checks these boundaries, and where it cannot:
+
+- **The next operation** — a line that binds results (`custom-body-boundary`) or
+  starts a generic operation (`custom-body-generic-op`) must not fall inside a
+  custom body. The second matters because an operation that binds nothing, once
+  swallowed, leaves no trace any other check can see.
+- **A block label** — every line-initial label must yield a `block_label`
+  (`block-label`). No body ran over a label line in the 617 examples on
+  2026-09-28.
+- **A region close** — not checked by line. An operation's own multi-line
+  attribute dictionary also closes with `}` (`func.func @f() attributes {` …
+  `}`), so a `}` line inside a body proves nothing by itself; 89 such lines on
+  2026-09-28 mixed real absorptions with attribute dictionaries.
+- **The operation-level `loc(...)`** — not checked yet.
+
 **Runtime dialect semantics — out of scope.** Registered assembly callbacks,
 verifier rules, traits, interfaces, lowering. Record a limit; add no grammar.
 
@@ -275,6 +290,10 @@ signature parsed as a region holding an operation. The wrapper and elided
 terminators offset such an excess in most files, so only the worst ones surface —
 read them as leads to open, not as a count of affected files.
 
+A ceiling has a blind side too. A swallowed operation makes the grammar count
+*fewer* operations — the direction a ceiling expects — so no count can show it.
+Lost operations are the boundary invariants' job.
+
 **The results-bound caveat, learned the hard way.** Result counts are *not*
 exactly equal under parse-and-print. MLIR lets an operation's results go unnamed,
 and the printer then invents a name for them:
@@ -371,12 +390,14 @@ Triage:
 2. **Which principle?** 1 and 4. The operation boundary was not preserved, and the
    custom body absorbed the following operation's result binding.
 3. **Is it a dialect problem?** No — `arith.constant` is not special here. Any
-   custom operation followed by a result-binding operation reproduces it: a
-   region-less one, and one with a region once the region has closed. So the fix
-   belongs on the general path; a dialect branch would be the wrong shape of
-   answer and would violate principle 3. (The region-bearing half was missed at
-   first, because the boundary invariant then exempted any operation holding a
-   region; a corpus case for the fix needs both shapes.)
+   custom operation followed by the start of another operation reproduces it: a
+   region-less one, and one with a region once the region has closed. A result
+   binding is absorbed as here; a generic operation that binds nothing is
+   absorbed whole and vanishes from the tree. So the fix belongs on the general
+   path; a dialect branch would be the wrong shape of answer and would violate
+   principle 3. (The region-bearing and whole-operation shapes were found later,
+   once the boundary checks stopped exempting regions and started looking at
+   generic operations; a corpus case for the fix needs every shape.)
 4. **Where is it not?** All four invariants are clean across 220 real examples
    normalised by `mlir-opt --mlir-print-op-generic`. Principle 2 holds — the strict
    generic path is correct — so the defect is confined to the custom-assembly path.
