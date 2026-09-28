@@ -222,7 +222,8 @@ the whole reason the parser was written instead of hard-coding the ecosystem.
 `scripts/probe.py` is standard-library Python and writes nothing into the parser
 repository. Run it from the skill directory with `REPO`, `SPEC` and `TOOL` set as in
 Part 0. Every command that prints detail takes `--show N` to widen it, and
-`--show 0` for summary lines only.
+`--show 0` for summary lines only; the ones that parse use every core, and
+`--jobs N` limits them.
 
 **Compare against the reference parser first, where one exists:**
 

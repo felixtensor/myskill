@@ -18,6 +18,7 @@ import os
 import re
 import sys
 import tempfile
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -299,6 +300,26 @@ def call(argv):
     with contextlib.redirect_stdout(out):
         status = probe.main(argv)
     return status, out.getvalue()
+
+
+def python_tool(directory, name, source):
+    """An executable that runs `source` with this interpreter."""
+    return write(os.path.join(directory, name),
+                 f"#!{sys.executable}\n{source}", executable=True)
+
+
+# Stands in for the tree-sitter CLI: one tree per file, one operation with an
+# op_result for each line that starts with `%`.
+FAKE_CLI = """\
+import sys
+for path in sys.argv[2:]:
+    n = sum(1 for line in open(path) if line.startswith("%"))
+    out = [f"(toplevel [0, 0] - [{n}, 0]"]
+    for i in range(n):
+        out += [f"  (operation [{i}, 0] - [{i}, 6]",
+                f"    lhs: (op_result [{i}, 0] - [{i}, 2]))"]
+    print("\\n".join(out) + ")")
+"""
 
 
 def write(path, text, executable=False):
@@ -587,6 +608,46 @@ class Census(unittest.TestCase):
             a = write(os.path.join(tmp, "a.json"), payload)
             b = write(os.path.join(tmp, "b.json"), payload)
             self.assertEqual(call(["diff", a, b])[0], 0)
+
+
+class Speed(unittest.TestCase):
+    """The faster paths must give exactly the answers the plain ones did."""
+
+    def test_walk_keeps_pre_order(self):
+        def recursive(node):
+            yield node
+            for child in node.children:
+                yield from recursive(child)
+        tree = tree_of(AFTER_REGION_TREE)
+        self.assertEqual([id(n) for n in tree.walk()], [id(n) for n in recursive(tree)])
+
+    def test_parallel_parsing_gives_the_sequential_answer_in_order(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = [python_tool(tmp, "fake-tree-sitter", FAKE_CLI)]
+            files = [write(os.path.join(tmp, f"f{i}.mlir"), "%x = y\n" * i)
+                     for i in range(1, 6)]
+            args = types.SimpleNamespace(batch=2, jobs=1)
+            sequential = list(probe.map_files(tmp, cli, files, args,
+                                              probe.census_file, None))
+            args.jobs = 3
+            parallel = list(probe.map_files(tmp, cli, files, args,
+                                            probe.census_file, None))
+        self.assertEqual([path for path, _ in sequential], files)
+        self.assertEqual(parallel, sequential)
+        self.assertEqual(sequential[2][1][0]["op_result"], 3)
+
+    def test_the_repository_cli_is_called_directly(self):
+        with tempfile.TemporaryDirectory() as repo:
+            bin_dir = os.path.join(repo, "node_modules", ".bin")
+            os.makedirs(bin_dir)
+            local = python_tool(bin_dir, "tree-sitter", "print('tree-sitter 0.27.0')\n")
+            self.assertEqual(probe.resolve_cli({}, repo), [local])
+
+    def test_npx_is_the_fallback_and_a_spec_cli_wins(self):
+        with tempfile.TemporaryDirectory() as repo:
+            self.assertEqual(probe.resolve_cli({}, repo)[1:], ["--no-install", "tree-sitter"])
+            self.assertEqual(probe.resolve_cli({"cli": ["/nowhere/ts", "-q"]}, repo),
+                             ["/nowhere/ts", "-q"])
 
 
 class Provenance(unittest.TestCase):
