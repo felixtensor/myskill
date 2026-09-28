@@ -406,8 +406,10 @@ Triage:
 5. **Why was it invisible?** All four gates were green. `test:examples` only checks
    ERROR/MISSING, and there are none. `tree-sitter test` was green because the
    corpus records the defective shape as the *expected* tree — 43 of 88 corpus
-   cases with SSA bindings, 178 `op_result` nodes short of their own inputs. The
-   contract had been overwritten by the bug it was supposed to catch.
+   cases with SSA bindings, 178 `op_result` nodes short of their own inputs,
+   counted by line; 44 cases and 180 nodes once each line's names are counted
+   (2026-09-28). The contract had been overwritten by the bug it was supposed to
+   catch.
 
 Detection, for reference. The first two need no reference compiler; the third is
 what localised it:

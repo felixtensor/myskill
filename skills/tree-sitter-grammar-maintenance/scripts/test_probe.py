@@ -489,6 +489,80 @@ class Skeleton(unittest.TestCase):
         self.assertIn("NOTHING WAS COMPARED", text)
 
 
+class Corpus(unittest.TestCase):
+    INV = SPEC["corpus_invariants"][0]
+    # The shape `memref.extract_strided_metadata` had: two names on one line,
+    # and a binding lost on the next -- two lines, two nodes, nothing flagged.
+    MASKED = """\
+================================================================================
+masked loss
+================================================================================
+
+%a, %b = "t.two"() : () -> (i32, i32)
+%c = arith.addi %a, %b : i32
+
+--------------------------------------------------------------------------------
+
+(toplevel
+  (operation
+    lhs: (op_result
+      (value_use))
+    lhs: (op_result
+      (value_use))
+    rhs: (generic_operation
+      (string_literal)
+      (function_type)))
+  (operation
+    rhs: (custom_operation
+      name: (custom_op_name)
+      (value_use)
+      (value_use)
+      (type))))
+"""
+    GROUP = """\
+================================================================================
+result group
+================================================================================
+
+%x:2 = "t.two"() : () -> (i32, i32)
+
+--------------------------------------------------------------------------------
+
+(toplevel
+  (operation
+    lhs: (op_result
+      (value_use))
+    rhs: (generic_operation
+      (string_literal)
+      (function_type))))
+"""
+
+    def case(self, text):
+        [(_, src, tree)] = list(probe.split_corpus(text))
+        return src, tree
+
+    def test_names_are_counted_not_lines(self):
+        src, tree = self.case(self.MASKED)
+        self.assertEqual(probe.corpus_balance(self.INV, src, tree), (3, 2))
+        by_line = {k: v for k, v in self.INV.items() if k != "count_regex"}
+        self.assertEqual(probe.corpus_balance(by_line, src, tree), (2, 2))
+
+    def test_a_result_group_is_one_name(self):
+        src, tree = self.case(self.GROUP)
+        self.assertEqual(probe.corpus_balance(self.INV, src, tree), (1, 1))
+
+    def test_the_corpus_command_reports_the_loss(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "test", "corpus"))
+            write(os.path.join(tmp, "test", "corpus", "cases.txt"),
+                  self.MASKED + "\n" + self.GROUP)
+            spec = os.path.join(HERE, "..", "assets", "invariants", "mlir.json")
+            status, text = call(["corpus", "--repo", tmp, "--spec", spec])
+        self.assertEqual(status, 1)
+        self.assertIn("1/2 case(s): 1 short by 1 op_result, 0 over", text)
+        self.assertIn("'masked loss'  3 in input, 2 in expected tree", text)
+
+
 class Census(unittest.TestCase):
     def test_a_shape_change_with_equal_counts_is_a_blast_radius(self):
         before = tree_of("(toplevel [0, 0] - [2, 0]\n  (operation [0, 0] - [0, 9]))")

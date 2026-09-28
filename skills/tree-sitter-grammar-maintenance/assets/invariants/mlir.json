@@ -16,7 +16,8 @@
       "layer": 1,
       "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*%)",
       "node": "op_result",
-      "why": "The corpus is the persistent AST contract, so a defect recorded there as the expected result is invisible to every gate at once. A case whose expected tree holds fewer op_result nodes than its input has binding lines was accepted from --update without being read. The count is conservative: one line may bind several results."
+      "count_regex": "%[A-Za-z0-9_$.\\-]+(?::[0-9]+)?",
+      "why": "The corpus is the persistent AST contract, so a defect recorded there as the expected result is invisible to every gate at once. A case whose expected tree holds a different number of op_result nodes than the names its input binds was accepted from --update without being read. Names are counted, not lines: `%a, %b =` binds two, `%x:2 =` one, and a line binding several would otherwise cover for a binding lost elsewhere in the case."
     }
   ],
   "invariants": [

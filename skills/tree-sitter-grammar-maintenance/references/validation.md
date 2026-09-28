@@ -133,6 +133,7 @@ python3 scripts/test_probe.py
 | `ceiling` 只标记 grammar 多于 reference 的方向 | 两个方向都当噪声时，grammar 凭空生成的 region 被放过 |
 | 带 region 的节点在 region 关闭之后仍然检查 | 整个节点被豁免，吞掉后续绑定的 body 看不见 |
 | 不绑定结果的 generic 操作被 custom body 吞掉时仍然报告；region 里面的同类行不报 | 整个操作从树里消失：绑定检查只看 `%x =` 行，skeleton 的 operation 上限又把"数得少"当作预期，没有任何检查报出来 |
+| corpus 检查按绑定的名字计数（`%a, %b` 算两个、`%x:2` 算一个），与期望树里的节点数精确比较 | 一行绑定多个名字，会掩盖同一用例里别处丢掉的绑定——`memref.extract_strided_metadata` 就是这样漏掉的 |
 | `%b = %y)` 这种操作数赋值不算绑定行 | 换行的 `iter_args`、`gpu.launch` 表头产生假命中 |
 | 命中按 mode 聚类，示例先覆盖不同文件 | 一个缺陷的上万条命中被当成上万个问题 |
 | census 在计数相同、形状不同时仍然报告 | span 或父节点变了的改动被报告成 inert |
