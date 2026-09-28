@@ -25,7 +25,8 @@ This repository stores the owner's reusable personal workflows as portable Agent
 
 - Update `catalog.json`, the human-readable catalog in `skills/README.md`, and the skill list in the root `README.md` when adding, renaming, or removing a skill.
 - Record each skill's validation cases in `skills/<skill-name>/references/validation.md`, and walk them before changing the skill.
-- Run `python scripts/validate_skills.py` before declaring a skill change complete.
+- Run `python scripts/validate_skills.py` before declaring a skill change complete,
+  and run the skill's own `scripts/test_*.py` when it ships any.
 - Keep repository-level tooling separate from scripts bundled inside an individual skill.
 
 ## Commits

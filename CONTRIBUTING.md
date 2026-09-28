@@ -8,6 +8,8 @@
 python scripts/validate_skills.py
 ```
 
+skill 自带 `scripts/test_*.py` 时，一并运行它们；CI 也会逐个执行。
+
 ## Commit messages
 
 提交信息使用 [Conventional Commits](https://www.conventionalcommits.org/) 格式：
