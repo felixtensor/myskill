@@ -102,22 +102,14 @@ clean, and which reference parser the last pass used. Re-litigating a settled
 trade-off is the most common way this work gets repeated.
 
 **The reference parser is declared by the user, never discovered.** Do not search
-`PATH`, do not try a list of likely names, do not take the first plausible binary. A
-comparison against a tool nobody chose reads as authoritative while resting on
-nothing — and the whole value of this evidence line is that its provenance is known.
-Resolve it in this order:
-
-1. **The user named it in this session** — use that path.
-2. **The audit record holds an absolute path** — reuse it.
-3. **Otherwise ask, and wait.** Ask however the client allows: its question or
-   option-picker mechanism where one exists, plain text otherwise. One line is
-   enough; the spec's `tool_hint` says what kind of tool serves.
-
-`probe.py` runs the spec's self-check on whatever it is given and refuses a tool that
-fails it, so a wrong answer fails loudly instead of quietly. **If the user has none**,
-continue with the remaining checks and **say in the report that the reference
-comparison did not run and coverage is reduced**. That is a fine outcome; presenting
-it as a complete audit is not.
+`PATH` or try likely names: a comparison against a tool nobody chose reads as
+authoritative while resting on nothing. Take, in order, the path the user gave in
+this session; the absolute path in the audit record; otherwise ask — with the
+client's question mechanism where there is one — and wait. The spec's `tool_hint`
+says what kind of tool serves, and `probe.py` refuses one that fails the spec's
+self-check, so a wrong answer fails loudly. **If the user has none**, run the other
+checks and **say in the report that the reference comparison did not run and
+coverage is reduced** — a fine outcome, as long as it is not presented as complete.
 
 **Check the toolchain, and record what produced the numbers.** From the skill
 directory:
@@ -129,13 +121,11 @@ TOOL=/path/declared/by/the/user         # leave --tool off if there is none
 python3 scripts/probe.py provenance --repo "$REPO" --spec "$SPEC" --tool "$TOOL"
 ```
 
-It prints the lines the audit record needs — branch and commit, the CLI version
-against the lock file, the reference parser's absolute path and version, the skill
-version — and exits 1 when the CLI in `node_modules` is not the one the lock pins.
-Measurements from a parser that is not the one CI builds are worthless, and this
-check has already caught a real drift. A repository with no lock file is reported as
-such: CI then takes the newest CLI in the declared range, so name the version you
-measured with.
+It prints the audit record's provenance lines — commit, CLI against the lock file,
+the reference parser's absolute path and version, the skill version — and exits 1
+when the CLI is not the one the lock pins: numbers from a parser CI would not build
+are worthless, and this check has caught a real drift. Without a lock file, CI takes
+the newest CLI in the declared range, so name the version you measured with.
 
 On a mismatch, **ask before repairing** with `npm ci`, and rerun `provenance` after:
 npm may block the `tree-sitter-cli` install script and leave a package with no binary
@@ -148,11 +138,10 @@ in it. The remaining repair is then the matching release binary in
 (cd "$REPO" && npx tree-sitter generate && git status --short -- src/)
 ```
 
-It prints nothing when the checked-in parser is current. The check covers every
-generated file, including `src/node-types.json`, where the public AST surface is
-checked, and files a newer CLI adds. Any output means the checked-in artifacts are
-stale: measure on the regenerated parser, and say in the report that `src/` now
-differs from the commit.
+It prints nothing when the checked-in parser is current, and covers every generated
+file — `src/node-types.json`, where the public AST surface is checked, and anything
+a newer CLI adds. Any output means stale artifacts: measure on the regenerated
+parser, and say in the report that `src/` now differs from the commit.
 
 **Record the baseline.** Run the repository's own gates and write down what they
 say, unchanged:
@@ -280,7 +269,8 @@ statement:
   type. This is how a lost or re-attributed binding is detected.
 - `no_node` — ERROR / MISSING must not appear, with locations. A MISSING token is
   usually anonymous and absent from the printed tree; the probe takes it from the
-  CLI's per-file error line instead.
+  CLI's per-file error line instead, which names only a file's *first* error — fix
+  it and rerun before concluding the file has no other.
 - `span_guard` — a node must not extend across a line that unambiguously starts the
   next sibling construct. This is boundary preservation in machine-checkable form.
   With `check_after_last`, a node holding a region is checked after the region
@@ -487,13 +477,10 @@ becomes acceptable is not, and is not yours to do.
 
 # Part 9 · Boundaries
 
-No persistent review ledger or AST manifest; no per-file AST notarization of the
-example set; no resident reference-compiler oracle or CST-to-IR mapping layer; no
-permanent tooling, report or baseline inside the parser repository; no amendment to
-the contract's principles to make a change land; no grammar change without a
-hand-written, human-read corpus case; no dedicated rule justified by dialect coverage
-alone. `references/boundaries.md` says why each was rejected, so that a refusal
-comes with a reason and a bounded alternative rather than a flat no.
-
-If an audit keeps demanding more infrastructure to reach a conclusion, the audit is
-scoped wrong. Narrow it to one construct, one invariant, one reproducer.
+No persistent ledger or AST manifest, no per-file notarization of the examples, no
+resident reference oracle or CST-to-IR mapping, no permanent tooling or baseline in
+the parser repository, no principle amended to land a change, no grammar change
+without a hand-written corpus case, no dedicated rule for coverage alone —
+`references/boundaries.md` gives each refusal its reason and a bounded alternative.
+If an audit keeps demanding more infrastructure, it is scoped wrong: narrow it to one
+construct, one invariant, one reproducer.
