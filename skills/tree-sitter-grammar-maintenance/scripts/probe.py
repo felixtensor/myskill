@@ -39,8 +39,8 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 
-DEFAULT_CLI = ["npx", "--no-install", "tree-sitter"]
 SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MAX_MODES = 10
 
@@ -52,7 +52,7 @@ _TOKEN = re.compile(
     r'(?P<open>\()'
     r'|(?P<close>\))'
     r'|(?P<field>[A-Za-z_][A-Za-z0-9_]*:)'
-    r'|(?P<range>\[\s*\d+\s*,\s*\d+\s*\])'
+    r'|(?P<range>\[\s*(?P<row>\d+)\s*,\s*(?P<col>\d+)\s*\])'
     # A MISSING or UNEXPECTED node names its token quoted, and the token may
     # be a parenthesis; read unquoted, it would open or close a node.
     r'|(?P<string>"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')'
@@ -74,9 +74,13 @@ class Node:
         self.detail = None  # the token a MISSING or UNEXPECTED node stands for
 
     def walk(self):
-        yield self
-        for c in self.children:
-            yield from c.walk()
+        # Pre-order with an explicit stack: nested `yield from` passed every
+        # node up through one generator per level, and dominated the checks.
+        stack = [self]
+        while stack:
+            node = stack.pop()
+            yield node
+            stack.extend(reversed(node.children))
 
 
 def parse_sexp(text):
@@ -120,7 +124,7 @@ def parse_sexp(text):
             expect_detail = None
             if not stack:
                 continue
-            r, c = (int(x) for x in re.findall(r"\d+", m.group(0)))
+            r, c = int(m.group("row")), int(m.group("col"))
             ranges += 1
             if ranges == 1:
                 stack[-1].start = (r, c)
@@ -624,6 +628,27 @@ def load_spec(path):
     return spec
 
 
+def resolve_cli(spec, grammar_repo):
+    """The command that runs the grammar repository's tree-sitter CLI.
+
+    A spec's `cli` is used as given. Otherwise the repository's own
+    node_modules/.bin/tree-sitter -- the binary `npx --no-install` would pick
+    -- is called directly, which saves starting npm on every call; npx is
+    the fallback. Looking names up with shutil.which also finds the `.cmd`
+    shims npm installs on Windows, which a bare name handed to subprocess
+    does not.
+    """
+    if spec.get("cli"):
+        cli = list(spec["cli"])
+        cli[0] = shutil.which(cli[0]) or cli[0]
+        return cli
+    local = shutil.which("tree-sitter",
+                         path=os.path.join(grammar_repo, "node_modules", ".bin"))
+    if local:
+        return [local]
+    return [shutil.which("npx") or "npx", "--no-install", "tree-sitter"]
+
+
 def grammar_cwd(args, repo):
     # The CLI resolves a language from the grammar repository it runs in, so it
     # is run from there even when the files under audit live somewhere else --
@@ -633,18 +658,61 @@ def grammar_cwd(args, repo):
     return os.path.abspath(getattr(args, "grammar_repo", None) or repo)
 
 
-def iter_trees(repo, spec, args):
-    cli = spec.get("cli", DEFAULT_CLI)
+def spec_files(repo, spec, args):
     patterns = args.files or spec["files"]
     files = resolve_files(repo, patterns)
     if not files:
         raise SystemExit(f"no files matched: {patterns}")
-    cwd = grammar_cwd(args, repo)
-    skip_re = re.compile(spec["skip_line"]) if spec.get("skip_line") else None
-    batch = args.batch
-    for i in range(0, len(files), batch):
-        for path, tree in parse_batch(cwd, cli, files[i:i + batch]):
-            yield path, tree, source_lines(path, skip_re)
+    return files
+
+
+def _reduce_batch(job):
+    """Parse one batch and keep only what the reducer extracts per file."""
+    reducer, cwd, cli, files, context = job
+    return [(path, reducer(path, tree, context))
+            for path, tree in parse_batch(cwd, cli, files)]
+
+
+def map_files(cwd, cli, files, args, reducer, context):
+    """Yield (path, reducer(path, tree, context)) for each file, in order.
+
+    Building trees from the CLI's output is most of a run's time, so batches
+    are parsed in worker processes. Trees stay in the worker; only the small
+    result a reducer extracts -- hits, counts -- comes back, and results
+    arrive in input order whatever the number of workers.
+    """
+    jobs = [(reducer, cwd, cli, files[i:i + args.batch], context)
+            for i in range(0, len(files), args.batch)]
+    if args.jobs > 1 and len(jobs) > 1:
+        try:
+            pool = ProcessPoolExecutor(max_workers=min(args.jobs, len(jobs)))
+        except (OSError, NotImplementedError):
+            pool = None  # no process support here; parse in this process
+        if pool is not None:
+            with pool:
+                for results in pool.map(_reduce_batch, jobs):
+                    yield from results
+            return
+    for job in jobs:
+        yield from _reduce_batch(job)
+
+
+def probe_file(path, tree, context):
+    """Each selected invariant's hits in one file."""
+    selected, skip_line = context
+    lines = source_lines(path, re.compile(skip_line) if skip_line else None)
+    return [CHECKS[inv["kind"]](inv, tree, lines) for inv in selected]
+
+
+def census_file(path, tree, context):
+    """A file's node counts and shape digest."""
+    return census_entry(tree)
+
+
+def measure_file(path, tree, counts_spec):
+    """What the tree holds of each quantity the skeleton compares."""
+    lines = read_bytes_lines(path)
+    return [measure(tree, entry, lines) for entry in counts_spec]
 
 
 def cmd_provenance(args):
@@ -656,7 +724,7 @@ def cmd_provenance(args):
     """
     repo = os.path.abspath(args.repo)
     spec = load_spec(args.spec) if args.spec else {}
-    cli = spec.get("cli", DEFAULT_CLI)
+    cli = resolve_cli(spec, repo)
     status = 0
 
     sha = _run(["git", "rev-parse", "--short", "HEAD"], repo)
@@ -714,13 +782,16 @@ def cmd_probe(args):
         if inv["kind"] not in CHECKS:
             raise SystemExit(f"unknown invariant kind: {inv['kind']}")
 
+    files = spec_files(repo, spec, args)
+    cwd = grammar_cwd(args, repo)
     results = {inv["id"]: [] for inv in selected}
     n_files = 0
-    for path, tree, lines in iter_trees(repo, spec, args):
+    for path, per_inv in map_files(cwd, resolve_cli(spec, cwd), files, args,
+                                   probe_file, (selected, spec.get("skip_line"))):
         n_files += 1
         rel = os.path.relpath(path, repo)
-        for inv in selected:
-            for row, detail, mode in CHECKS[inv["kind"]](inv, tree, lines):
+        for inv, hits in zip(selected, per_inv):
+            for row, detail, mode in hits:
                 results[inv["id"]].append((rel, row, detail, mode))
 
     total = 0
@@ -893,7 +964,7 @@ def cmd_skeleton(args):
         raise SystemExit("the spec's normalizer declares no counts to compare")
     repo = os.path.abspath(args.repo)
     cwd = grammar_cwd(args, repo)
-    cli = spec.get("cli", DEFAULT_CLI)
+    cli = resolve_cli(spec, cwd)
     tool = declared_tool(args.tool, norm)
     command = [tool] + norm.get("args", [])
 
@@ -902,36 +973,35 @@ def cmd_skeleton(args):
     if not files:
         raise SystemExit("no files matched")
 
+    def normalize(src):
+        proc = subprocess.run(command + [src], capture_output=True, text=True)
+        return proc.stdout if proc.returncode == 0 and proc.stdout.strip() else None
+
     rejected, compared = 0, 0
     measured = [[] for _ in counts_spec]  # per entry: (rel, grammar, reference)
     with tempfile.TemporaryDirectory() as tmp:
         run_self_check(tool, norm, spec, tmp)
         version = tool_version(tool)
         print(f"reference parser: {tool}" + (f"  ({version})" if version else ""))
-        for i in range(0, len(files), args.batch):
-            batch = files[i:i + args.batch]
-            pairs = []
-            for j, src in enumerate(batch):
-                dst = os.path.join(tmp, f"{i + j}_{os.path.basename(src)}")
-                proc = subprocess.run(command + [src], capture_output=True,
-                                      text=True)
-                if proc.returncode != 0 or not proc.stdout.strip():
-                    rejected += 1
-                    continue
-                with open(dst, "w", encoding="utf-8") as fh:
-                    fh.write(proc.stdout)
-                pairs.append((src, dst))
-            if not pairs:
+        # One tool process per file, side by side; map keeps input order.
+        with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+            outputs = list(pool.map(normalize, files))
+        pairs = []
+        for k, (src, out) in enumerate(zip(files, outputs)):
+            if out is None:
+                rejected += 1
                 continue
-            orig = dict(parse_batch(cwd, cli, [p[0] for p in pairs]))
-            gen = dict(parse_batch(cwd, cli, [p[1] for p in pairs]))
-            for src, dst in pairs:
-                compared += 1
-                lo, lg = read_bytes_lines(src), read_bytes_lines(dst)
-                rel = os.path.relpath(src, repo)
-                for k, entry in enumerate(counts_spec):
-                    measured[k].append((rel, measure(orig[src], entry, lo),
-                                        measure(gen[dst], entry, lg)))
+            dst = os.path.join(tmp, f"{k}_{os.path.basename(src)}")
+            with open(dst, "w", encoding="utf-8") as fh:
+                fh.write(out)
+            pairs.append((src, dst))
+        both = [path for pair in pairs for path in pair]
+        counts = dict(map_files(cwd, cli, both, args, measure_file, counts_spec))
+        for src, dst in pairs:
+            compared += 1
+            rel = os.path.relpath(src, repo)
+            for k in range(len(counts_spec)):
+                measured[k].append((rel, counts[src][k], counts[dst][k]))
 
     print(f"compared: {compared} file(s)   "
           f"not accepted by the reference tool: {rejected}")
@@ -1016,10 +1086,13 @@ def report_counts(entry, rows, compared, show):
 def cmd_census(args):
     spec = load_spec(args.spec)
     repo = os.path.abspath(args.repo)
+    files = spec_files(repo, spec, args)
+    cwd = grammar_cwd(args, repo)
     census, shapes = {}, {}
-    for path, tree, _lines in iter_trees(repo, spec, args):
+    for path, (counts, shape) in map_files(cwd, resolve_cli(spec, cwd), files,
+                                           args, census_file, None):
         rel = os.path.relpath(path, repo)
-        census[rel], shapes[rel] = census_entry(tree)
+        census[rel], shapes[rel] = counts, shape
     # The shapes are digests for one before/after comparison, written to a
     # scratch path -- not a baseline, and never kept in the repository.
     payload = {"language": spec["language"], "files": census, "shapes": shapes}
@@ -1115,6 +1188,8 @@ def main(argv=None):
         p.add_argument("--files", nargs="*", help="override the spec's globs")
         p.add_argument("--batch", type=int, default=60,
                        help="files per CLI invocation (default 60)")
+        p.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                       help="processes to run at once (default: one per CPU)")
         p.add_argument("--grammar-repo",
                        help="the grammar repository whose parser to use, when "
                             "--repo holds files from somewhere else (normalized "
