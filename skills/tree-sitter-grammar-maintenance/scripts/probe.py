@@ -771,13 +771,35 @@ def split_corpus(text):
         yield name, split[0], split[1]
 
 
+def corpus_balance(inv, src, tree):
+    """(how many the input binds, how many nodes the expected tree holds).
+
+    A line matching `line` counts once, or -- with `count_regex` -- once per
+    match of that regex inside the matched text, so `%a, %b =` counts two
+    and `%x:2 =` one, exactly as many as the nodes a correct tree holds.
+    Counted by line, a line binding several names covers for a binding
+    lost elsewhere in the same case.
+    """
+    pat = re.compile(inv["line"])
+    each = re.compile(inv["count_regex"]) if inv.get("count_regex") else None
+    want = 0
+    for ln in src.splitlines():
+        m = pat.match(ln)
+        if m:
+            want += sum(1 for _ in each.finditer(m.group(0))) if each else 1
+    got = len(re.findall(r"\(%s\b" % re.escape(inv["node"]), tree))
+    return want, got
+
+
 def cmd_corpus(args):
     """Check the corpus against itself: no parser is needed.
 
     The corpus is the persistent AST contract. If its expected trees were
     accepted from `--update` without being read, a parser defect is recorded
     there as the intended result, and every gate goes green on the wrong tree.
-    This compares each case's input against its own expected tree.
+    This compares each case's input against its own expected tree: exactly
+    when the invariant counts what each line binds, and only for a shortfall
+    when it counts lines.
     """
     spec = load_spec(args.spec)
     repo = os.path.abspath(args.repo)
@@ -793,21 +815,18 @@ def cmd_corpus(args):
 
     total = 0
     for inv in checks:
-        pat = re.compile(inv["line"])
-        node = re.compile(r"\(%s\b" % re.escape(inv["node"]))
-        hits, n_cases, lost = [], 0, 0
+        exact = bool(inv.get("count_regex"))
+        hits, n_cases = [], 0
         for path in files:
             rel = os.path.relpath(path, repo)
             with open(path, encoding="utf-8", errors="replace") as fh:
                 text = fh.read()
             for name, src, tree in split_corpus(text):
-                want = sum(1 for ln in src.splitlines() if pat.match(ln))
+                want, got = corpus_balance(inv, src, tree)
                 if not want:
                     continue
                 n_cases += 1
-                got = len(node.findall(tree))
-                if got < want:
-                    lost += want - got
+                if got < want or (exact and got > want):
                     hits.append((rel, name, want, got))
         total += len(hits)
         if n_cases == 0:
@@ -815,12 +834,16 @@ def cmd_corpus(args):
                   f"that is a coverage gap, not a pass")
             total += 1
             continue
+        short = [h for h in hits if h[3] < h[2]]
+        over = [h for h in hits if h[3] > h[2]]
         status = "OK  " if not hits else "HIT "
         print(f"{status} {inv['id']}  (layer {inv.get('layer', '?')})  "
-              f"{len(hits)}/{n_cases} case(s), {lost} missing {inv['node']}")
+              f"{len(hits)}/{n_cases} case(s): {len(short)} short by "
+              f"{sum(w - g for _r, _n, w, g in short)} {inv['node']}"
+              + (f", {len(over)} over" if exact else ""))
         if hits and args.show:
             print(f"     {inv.get('why', '').strip()}")
-            hits.sort(key=lambda h: h[3] - h[2])
+            hits.sort(key=lambda h: -abs(h[3] - h[2]))
             for rel, name, want, got in hits[:args.show]:
                 print(f"       {rel}: {name!r}  {want} in input, "
                       f"{got} in expected tree")
