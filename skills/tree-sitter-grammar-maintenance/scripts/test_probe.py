@@ -297,7 +297,7 @@ def count(tree, type_):
 def call(argv):
     """Run the command line; return (exit status, stdout)."""
     out = io.StringIO()
-    with contextlib.redirect_stdout(out):
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(io.StringIO()):
         status = probe.main(argv)
     return status, out.getvalue()
 
@@ -590,6 +590,81 @@ result group
         self.assertEqual(status, 1)
         self.assertIn("1/2 case(s): 1 short by 1 op_result, 0 over", text)
         self.assertIn("'masked loss'  3 in input, 2 in expected tree", text)
+
+
+class SkeletonRuns(unittest.TestCase):
+    """`skeleton --out` and `diff` around a grammar change."""
+
+    # Stands in for mlir-opt: passes the self-check, prints each input back,
+    # and invents one extra result for a file named unnamed.mlir -- the way
+    # generic form names a result the source left unnamed.
+    FAKE_OPT = (
+        "import sys\n"
+        "if any('self-check' in a for a in sys.argv[1:]):\n"
+        "    print('\"func.func\"() ({}) : () -> ()')\n"
+        "    sys.exit(0)\n"
+        "path = sys.argv[-1]\n"
+        "sys.stdout.write(open(path).read())\n"
+        "if path.endswith('unnamed.mlir'):\n"
+        "    print('%9 = z')\n")
+
+    def test_a_run_is_saved_for_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "examples"))
+            for name in ("named.mlir", "unnamed.mlir"):
+                write(os.path.join(tmp, "examples", name), "%x = y\n")
+            spec = dict(SPEC, cli=[python_tool(tmp, "fake-tree-sitter", FAKE_CLI)])
+            spec_path = write(os.path.join(tmp, "spec.json"), json.dumps(spec))
+            tool = python_tool(tmp, "mlir-opt", self.FAKE_OPT)
+            out = os.path.join(tmp, "run.json")
+            status, text = call(["skeleton", "--repo", tmp, "--spec", spec_path,
+                                 "--tool", tool, "--out", out, "--jobs", "2"])
+            with open(out, encoding="utf-8") as fh:
+                run = json.load(fh)
+        self.assertEqual(status, 1)  # the unnamed result: grammar 1, reference 2
+        self.assertEqual(run["kind"], "skeleton")
+        self.assertEqual(run["declined"], [])
+        results = [c["node"] for c in run["counts"]].index("op_result")
+        named = os.path.join("examples", "named.mlir")
+        unnamed = os.path.join("examples", "unnamed.mlir")
+        self.assertEqual(run["files"][named][results], [1, 1])
+        self.assertEqual(run["files"][unnamed][results], [1, 2])
+
+    def payloads(self, before, after, tmp):
+        def one(name, files):
+            return write(os.path.join(tmp, name), json.dumps({
+                "kind": "skeleton", "language": "mlir", "declined": [],
+                "counts": [{"node": "op_result", "label": "results bound",
+                            "compare": "ranked"}],
+                "files": {rel: [pair] for rel, pair in files.items()}}))
+        return one("before.json", before), one("after.json", after)
+
+    def test_a_fix_may_only_move_files_closer(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            before, after = self.payloads(
+                {"a": [5, 8], "b": [3, 3], "c": [2, 4], "d": [2, 2], "e": [2, 2]},
+                {"a": [8, 8], "b": [3, 3], "c": [1, 4], "d": [2, 3], "e": [3, 2]}, tmp)
+            status, text = call(["diff", before, after])
+        self.assertEqual(status, 1)
+        self.assertIn("1 closer, 1 further, 1 newly above the reference, "
+                      "reference side moved in 1", text)
+        for line in ("a: gap -3 -> +0", "c: gap -2 -> -3", "d: reference 2 -> 3",
+                     "e: gap +0 -> +1"):
+            self.assertIn(line, text)
+
+    def test_only_closer_is_a_clean_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            before, after = self.payloads({"a": [5, 8]}, {"a": [7, 8]}, tmp)
+            self.assertEqual(call(["diff", before, after])[0], 0)
+
+    def test_a_census_does_not_diff_against_a_skeleton_run(self):
+        counts, shape = probe.census_entry(tree_of(GOOD_TREE))
+        with tempfile.TemporaryDirectory() as tmp:
+            census = write(os.path.join(tmp, "census.json"), json.dumps(
+                {"kind": "census", "language": "x", "files": {"f": counts},
+                 "shapes": {"f": shape}}))
+            skeleton, _ = self.payloads({"a": [1, 1]}, {"a": [1, 1]}, tmp)
+            self.assertEqual(call(["diff", census, skeleton])[0], 2)
 
 
 class Census(unittest.TestCase):

@@ -25,8 +25,9 @@
   → 拿输入和期望树互相校验，不看它是否通过 `tree-sitter test`。通过本身不是证据。
 - **"我改了 grammar，帮我看看有没有副作用"**
   → 改动前后各跑一次 `census`（写到 `mktemp -d` 的目录），`diff` 之后逐条说明每类计数变化
-  和每个"计数相同、形状不同"的文件为什么应该变。只跑 `npm run test` 绿了就说没问题，属于
-  未完成。
+  和每个"计数相同、形状不同"的文件为什么应该变。有 reference parser 时，再各存一次
+  `skeleton --out` 并 `diff`：文件只能离 reference 更近；变远、新出现高于 reference、或
+  reference 一侧变了，都要给出解释。只跑 `npm run test` 绿了就说没问题，属于未完成。
 - **"某某方言的这个语法解析得很难看，加个规则支持一下"**
   → 落层。落在第二行且外层边界完好时，回答是"这是契约内的取舍，不改"，并说明理由；要改
   必须过 Part 5 的四个条件，包含未知 `test.*` dialect 的 fallback 回归用例。
@@ -144,6 +145,7 @@ python3 scripts/test_probe.py
 | 多进程解析与单进程的结果、顺序完全相同；迭代版 `walk` 与递归版顺序一致 | 并行后命中顺序或计数悄悄变了，前后两次运行没法比 |
 | 优先直接调用仓库的 `node_modules/.bin/tree-sitter`，找不到才退回 npx；spec 指定的 `cli` 优先 | 每批解析都多花 0.3 秒启动 npm |
 | 工具输出按 UTF-8 解码；skill 摘要不受 CRLF 检出影响 | Windows 上带非 ASCII 字符串属性的文件解码出错；同一个提交在两个平台上摘要不同 |
+| 两次 skeleton 运行的 `diff` 标出变远、新高于 reference 和 reference 一侧变动的文件；census 与 skeleton 的结果不能互相 `diff` | 修复是否真的让文件更接近 reference，只能靠肉眼比较总数；generic 路径被改动也没人发现 |
 | census 在计数相同、形状不同时仍然报告 | span 或父节点变了的改动被报告成 inert |
 | `--limit` 均匀抽样；声明的工具必须通过 spec 的自检；没声明时拒绝运行；一个文件都没比较时以 2 退出 | 只抽到少数几个目录；在一个没人选过的二进制上得出看似权威的数字；什么都没比较却报告通过 |
 | `provenance` 标出 CLI 与锁文件不一致，没有锁文件时说明版本范围 | 在 CI 不会构建的 parser 上测量 |
