@@ -199,39 +199,51 @@ The move that avoids all of that:
 > the program's structure.
 
 This is sound here specifically because the grammar parses generic form precisely
-(principle 2, verified clean across hundreds of normalized files). Generic form is
+(principle 2; all four invariants were clean over 220 normalized examples on
+2026-09-21). Generic form is
 the fixed point: no custom assembly, no dialect callbacks, just the core syntax the
 contract commits to.
 
 ### The invocation
 
 ```bash
-mlir-opt --allow-unregistered-dialect --mlir-print-op-generic --split-input-file FILE
+"$TOOL" --allow-unregistered-dialect --mlir-print-op-generic --split-input-file FILE
 ```
 
-Measured over 150 checked-in examples:
+These are the spec's `normalizer.args`. Files accepted, measured 2026-09-24 over all
+617 examples (pinned at LLVM `49ce9d0`) with `mlir-opt` from LLVM 24.0.0git:
 
 | Options | Files accepted |
 | --- | --- |
-| generic form alone | 99 / 150 |
-| **`+ --split-input-file`** | **126 / 150** |
-| `+ --no-implicit-module` | 52 / 150 — **do not use**, most files need the implicit module |
-| `+ --mlir-print-debuginfo` | 126 / 150, same coverage, and emits `loc(...)` |
+| generic form alone | 359 / 617 |
+| **`+ --split-input-file`** | **471 / 617** |
+| `+ --split-input-file --no-implicit-module` | 196 / 617 — **do not use**, most files need the implicit module |
+| `+ --split-input-file --mlir-print-debuginfo` | 471 / 617 — same coverage; not used, see below |
+
+A row is the number of files for which the tool exits 0 with output; re-derive one
+with:
+
+```bash
+n=0; for f in $(find examples -name '*.mlir'); do
+  out=$("$TOOL" --allow-unregistered-dialect --mlir-print-op-generic --split-input-file "$f" 2>/dev/null) \
+    && [ -n "$out" ] && n=$((n+1))
+done; echo "$n"
+```
 
 `--split-input-file` is the single biggest win: the upstream tests are full of
 `// -----` chunks, and without it every one of those files is simply unavailable.
-`--mlir-print-debuginfo` costs nothing and turns on a second comparison axis for the
-location family, which is on the Public AST Surface.
+`--mlir-print-debuginfo` is not used: it puts a `loc(...)` on every printed operation
+while the sources carry few, so a location count would differ in every file for a
+reason that says nothing about the grammar.
 
 The files the tool still rejects are pass pipelines, `expected-error` tests and
 syntax from a different LLVM revision. Those are outside this check by nature, which
-is exactly why the broad ERROR/MISSING sweep over all 617 examples still earns its
-place — the two lines of evidence cover different halves.
+is exactly why the ERROR/MISSING sweep over every example still earns its place — the
+two lines of evidence cover different halves.
 
 ```bash
-python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json
-python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json \
-  --tool /path/to/mlir-opt --limit 60
+python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json --tool "$TOOL"
+python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json --tool "$TOOL" --limit 60
 ```
 
 ### What is comparable, and what is not
@@ -286,10 +298,10 @@ Do not turn this into a pass/fail CI gate. It is a ranked lead generator whose t
 entries are worth opening, and the caveat above means a green number would be
 meaningless anyway.
 
-### Two other uses
+### Is this input legal MLIR at all?
 
 ```bash
-mlir-opt --verify-diagnostics FILE        # is this input legal MLIR at all?
+"$TOOL" --verify-diagnostics FILE
 ```
 
 Use it before blaming the grammar for failing on something, and before adding a
@@ -332,8 +344,8 @@ pass will rediscover the ugly tree and re-argue it.
 
 ## Worked triage: a must-fix
 
-Kept because the reasoning is the lesson, not because the defect is current.
-Confirmed 2026-09-21 on tree-sitter-mlir `dev/recheck-rules`, first on CLI 0.26.12
+Kept for the reasoning, not as a status report: whether the defect is still open
+belongs in the audit record, never here. Confirmed 2026-09-21 on tree-sitter-mlir `dev/recheck-rules`, first on CLI 0.26.12
 and again on 0.27.0 after repairing a lock/`node_modules` mismatch, with
 `src/parser.c` verified to regenerate identically from `grammar.js`.
 
@@ -383,7 +395,7 @@ what localised it:
 python3 scripts/probe.py corpus --repo "$REPO" --spec assets/invariants/mlir.json
 python3 scripts/probe.py probe  --repo "$REPO" --spec assets/invariants/mlir.json
 # normalise a batch, then audit the normalised files using the repo's parser
-mlir-opt --allow-unregistered-dialect --mlir-print-op-generic "$f" > "$OUT/$(basename $f)"
+"$TOOL" --allow-unregistered-dialect --mlir-print-op-generic "$f" > "$OUT/$(basename $f)"
 python3 scripts/probe.py probe --repo "$OUT" --grammar-repo "$REPO" \
   --spec assets/invariants/mlir.json --files '*.mlir'
 ```
