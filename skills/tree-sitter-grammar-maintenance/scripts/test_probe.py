@@ -227,6 +227,57 @@ WRAPPED_TREE = """\
                   (float_type [2, 26] - [2, 29]))))))))))"""
 
 
+# A generic operation that binds nothing, swallowed whole by the body before
+# it: `"bar"` survives only as a string literal, and nothing binds a result.
+SWALLOWED_SRC = """\
+%c = arith.constant 0 : index
+"bar"() : () -> ()
+"""
+SWALLOWED_TREE = """\
+(toplevel [0, 0] - [2, 0]
+  (operation [0, 0] - [1, 18]
+    lhs: (op_result [0, 0] - [0, 2]
+      (value_use [0, 0] - [0, 2]))
+    rhs: (custom_operation [0, 5] - [1, 18]
+      name: (custom_op_name [0, 5] - [0, 19])
+      (integer_literal [0, 20] - [0, 21])
+      (type [0, 24] - [0, 29]
+        (builtin_type [0, 24] - [0, 29]
+          (index_type [0, 24] - [0, 29])))
+      (string_literal [1, 0] - [1, 5]))))"""
+
+# Correct code: the same kind of line inside a region belongs to that region.
+NESTED_SRC = """\
+%0 = scf.execute_region -> i32 {
+  "foo"() : () -> ()
+  scf.yield %c : i32
+}
+"""
+NESTED_TREE = """\
+(toplevel [0, 0] - [4, 0]
+  (operation [0, 0] - [3, 1]
+    lhs: (op_result [0, 0] - [0, 2]
+      (value_use [0, 0] - [0, 2]))
+    rhs: (custom_operation [0, 5] - [3, 1]
+      name: (custom_op_name [0, 5] - [0, 23])
+      (type [0, 27] - [0, 30]
+        (builtin_type [0, 27] - [0, 30]
+          (integer_type [0, 27] - [0, 30])))
+      (region [0, 31] - [3, 1]
+        (entry_block [1, 2] - [2, 20]
+          (operation [1, 2] - [1, 20]
+            rhs: (generic_operation [1, 2] - [1, 20]
+              (string_literal [1, 2] - [1, 7])
+              (function_type [1, 12] - [1, 20])))
+          (operation [2, 2] - [2, 20]
+            rhs: (custom_operation [2, 2] - [2, 20]
+              name: (custom_op_name [2, 2] - [2, 11])
+              (value_use [2, 12] - [2, 14])
+              (type [2, 17] - [2, 20]
+                (builtin_type [2, 17] - [2, 20]
+                  (integer_type [2, 17] - [2, 20]))))))))))"""
+
+
 def tree_of(text):
     tree = probe.parse_sexp(text)
     assert tree is not None
@@ -324,6 +375,23 @@ class Invariants(unittest.TestCase):
     def test_a_wrapped_header_is_not_a_binding(self):
         for check in ("op-result-binding", "custom-body-boundary"):
             self.assertEqual(run(check, tree_of(WRAPPED_TREE), WRAPPED_SRC), [], check)
+
+    def test_a_swallowed_operation_that_binds_nothing_is_reported(self):
+        tree = tree_of(SWALLOWED_TREE)
+        # Neither binding check can see it: no line binds a lost result.
+        for check in ("op-result-binding", "custom-body-boundary"):
+            self.assertEqual(run(check, tree, SWALLOWED_SRC), [], check)
+        [(row, detail, mode)] = run("custom-body-generic-op", tree, SWALLOWED_SRC)
+        self.assertEqual((row, mode), (2, "custom_operation without a region"))
+        self.assertIn('"bar"() : () -> ()', detail)
+
+    def test_a_generic_operation_inside_a_region_is_not_flagged(self):
+        self.assertEqual(run("custom-body-generic-op", tree_of(NESTED_TREE), NESTED_SRC), [])
+
+    def test_a_bound_generic_operation_is_left_to_the_binding_check(self):
+        line = '%x = "foo"() : () -> i32'
+        self.assertIsNone(re.search(INVARIANTS["custom-body-generic-op"]["line"], line))
+        self.assertIsNotNone(re.search(INVARIANTS["custom-body-boundary"]["line"], line))
 
     def test_the_corpus_count_skips_operand_assignments(self):
         pat = re.compile(SPEC["corpus_invariants"][0]["line"])
