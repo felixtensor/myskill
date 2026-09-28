@@ -242,14 +242,34 @@ python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.j
 
 | Quantity | Comparable? |
 | --- | --- |
-| `op_result` count | **Yes, as a ranked signal** — the strongest one available |
-| `operation`, `region`, `block` counts | No — the implicit module wrapper and materialized entry-block labels move them; informational only |
+| results bound — `op_result` nodes, `%0:2` counted as two | **Yes, ranked in both directions** — the strongest signal available |
+| `operation`, `region`, `block` counts | **One-sided (`ceiling`).** The reference may count more: the implicit module wrapper, terminators the custom form elides, entry-block labels generic form materializes. The grammar counting more has no such reason and is flagged |
 | attributes | No — the printer adds dialect defaults, e.g. `overflowFlags = #arith.overflow<none>` |
 | names, ordering of operands | No — the printer renumbers everything |
 
-**The `op_result` caveat, learned the hard way.** Result counts are *not* exactly
-equal under parse-and-print. MLIR lets an operation's results go unnamed, and the
-printer then invents a name for them:
+**Count results, not `op_result` nodes.** Generic form never uses an operation's
+own result names, so it prints every multi-result operation as one group:
+
+```mlir
+%0, %1 = vector.deinterleave %a : ...                  // two op_result nodes
+%4:2 = "vector.deinterleave"(%arg4) : ...               // one op_result node
+```
+
+Counted as nodes, every such line puts the grammar *above* the reference — the
+direction this report calls always a defect. On 2026-09-24 the only file in that
+bucket was exactly this, and 65 of the 471 comparable examples contain such lines.
+The spec's `weight_regex` counts `%0:2` as two, which makes the claim true.
+
+**Why the other counts are one-sided.** Treating operation, region and block counts
+as noise in both directions hid structure MLIR does not have: on 2026-09-24 an
+argument attribute such as `{transform.readonly}` in a `transform.named_sequence`
+signature parsed as a region holding an operation. The wrapper and elided
+terminators offset such an excess in most files, so only the worst ones surface —
+read them as leads to open, not as a count of affected files.
+
+**The results-bound caveat, learned the hard way.** Result counts are *not*
+exactly equal under parse-and-print. MLIR lets an operation's results go unnamed,
+and the printer then invents a name for them:
 
 ```mlir
 affine.load %m[%i] : memref<?xf32>        // source binds nothing
@@ -343,9 +363,12 @@ Triage:
 2. **Which principle?** 1 and 4. The operation boundary was not preserved, and the
    custom body absorbed the following operation's result binding.
 3. **Is it a dialect problem?** No — `arith.constant` is not special here. Any
-   region-less custom operation followed by a result-binding operation reproduces
-   it. So the fix belongs on the general path; a dialect branch would be the wrong
-   shape of answer and would violate principle 3.
+   custom operation followed by a result-binding operation reproduces it: a
+   region-less one, and one with a region once the region has closed. So the fix
+   belongs on the general path; a dialect branch would be the wrong shape of
+   answer and would violate principle 3. (The region-bearing half was missed at
+   first, because the boundary invariant then exempted any operation holding a
+   region; a corpus case for the fix needs both shapes.)
 4. **Where is it not?** All four invariants are clean across 220 real examples
    normalised by `mlir-opt --mlir-print-op-generic`. Principle 2 holds — the strict
    generic path is correct — so the defect is confined to the custom-assembly path.

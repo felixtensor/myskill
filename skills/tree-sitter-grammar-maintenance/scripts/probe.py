@@ -3,24 +3,26 @@
 
 A parse that reports no ERROR is not evidence that the tree is correct. A
 permissive fallback rule can absorb valid syntax into a wrong shape and still
-exit 0. This script checks a parsed file set against declared structural
-invariants, and can take a node census so a grammar change's blast radius is
-measurable instead of assumed.
+exit 0. This script compares the grammar against the language's own parser,
+checks a parsed file set against declared structural invariants, and can take
+a node census so a grammar change's blast radius is measurable instead of
+assumed.
 
 It shells out to the repository's own tree-sitter CLI and reads the standard
 S-expression output. Standard library only; nothing is written into the parser
 repository.
 
 Usage:
-    probe.py probe   --repo DIR --spec FILE [--id ID]... [--files GLOB]
-    probe.py corpus  --repo DIR --spec FILE
-    probe.py skeleton --repo DIR --spec FILE [--tool PATH] [--limit N]
-    probe.py census  --repo DIR --spec FILE --out FILE
-    probe.py diff    BEFORE.json AFTER.json
+    probe.py skeleton --repo DIR --spec FILE --tool PATH [--limit N]
+    probe.py corpus   --repo DIR --spec FILE
+    probe.py probe    --repo DIR --spec FILE [--id ID]... [--files GLOB]
+    probe.py census   --repo DIR --spec FILE --out FILE
+    probe.py diff     BEFORE.json AFTER.json
 
-Exit status: 0 when every selected invariant holds, 1 on any hit, 2 on a
-tooling or configuration failure. A hit is a candidate for review, not a
-confirmed bug -- triage it against the language's contract document.
+Exit status: 0 when every selected check holds, 1 on any hit, 2 on a tooling
+or configuration failure, including a comparison that compared nothing. A hit
+is a candidate for review, not a confirmed bug -- triage it against the
+language's contract document.
 """
 
 from __future__ import annotations
@@ -43,14 +45,16 @@ _TOKEN = re.compile(
     r'|(?P<close>\))'
     r'|(?P<field>[A-Za-z_][A-Za-z0-9_]*:)'
     r'|(?P<range>\[\s*\d+\s*,\s*\d+\s*\])'
-    r'|(?P<string>"(?:[^"\\]|\\.)*")'
+    # A MISSING or UNEXPECTED node names its token quoted, and the token may
+    # be a parenthesis; read unquoted, it would open or close a node.
+    r'|(?P<string>"(?:[^"\\]|\\.)*"|\'(?:[^\'\\]|\\.)*\')'
     r'|(?P<name>[^\s()\[\]]+)'
     r'|(?P<ws>\s+)'
 )
 
 
 class Node:
-    __slots__ = ("type", "field", "start", "end", "children", "parent")
+    __slots__ = ("type", "field", "start", "end", "children", "parent", "detail")
 
     def __init__(self, type_, field, parent):
         self.type = type_
@@ -59,26 +63,22 @@ class Node:
         self.start = (0, 0)
         self.end = (0, 0)
         self.children = []
+        self.detail = None  # the token a MISSING or UNEXPECTED node stands for
 
     def walk(self):
         yield self
         for c in self.children:
             yield from c.walk()
 
-    def has_child(self, types):
-        return any(c.type in types for c in self.children)
-
-    def has_descendant(self, types):
-        return any(n.type in types for n in self.walk() if n is not self)
-
 
 def parse_sexp(text):
-    """Build a Node tree from `tree-sitter parse` S-expression output."""
+    """Build a Node tree from one file's `tree-sitter parse` S-expression."""
     root = None
     stack = []
     pending_field = None
     expect_name = False
-    ranges = []
+    expect_detail = None
+    ranges = 0
 
     for m in _TOKEN.finditer(text):
         kind = m.lastgroup
@@ -86,35 +86,47 @@ def parse_sexp(text):
             continue
         if kind == "open":
             expect_name = True
+            expect_detail = None
             continue
         if expect_name and kind in ("name", "string"):
+            if root is not None and not stack:
+                # Keeping the newer node would silently replace a whole tree.
+                raise SystemExit(
+                    "parse output holds a second tree where one was expected; "
+                    "refusing to guess which one belongs to the file")
             node = Node(m.group(0), pending_field, stack[-1] if stack else None)
             pending_field = None
             expect_name = False
-            ranges = []
+            ranges = 0
             if stack:
                 stack[-1].children.append(node)
             else:
                 root = node
             stack.append(node)
+            expect_detail = node if node.type in ("MISSING", "UNEXPECTED") else None
             continue
         if kind == "field":
             pending_field = m.group(0)[:-1]
             continue
         if kind == "range":
+            expect_detail = None
             if not stack:
                 continue
             r, c = (int(x) for x in re.findall(r"\d+", m.group(0)))
-            ranges.append((r, c))
-            if len(ranges) == 1:
+            ranges += 1
+            if ranges == 1:
                 stack[-1].start = (r, c)
-            elif len(ranges) == 2:
+            elif ranges == 2:
                 stack[-1].end = (r, c)
+            continue
+        if kind in ("name", "string") and expect_detail is not None:
+            expect_detail.detail = m.group(0)
+            expect_detail = None
             continue
         if kind == "close":
             if stack:
                 stack.pop()
-                ranges = []
+                ranges = 0
             continue
     return root
 
@@ -122,6 +134,15 @@ def parse_sexp(text):
 # --------------------------------------------------------------------------
 # Parsing a file set
 # --------------------------------------------------------------------------
+
+# After the tree of a file with a parse error, `tree-sitter parse` prints one
+# more line: the file name, timings, and the file's first ERROR or MISSING node.
+_SUMMARY = re.compile(
+    r"^(?P<path>.*?)\s*\tParse:.*?"
+    r"\((?P<type>ERROR|MISSING)"
+    r"(?:\s+(?P<what>\"(?:[^\"\\]|\\.)*\"|'(?:[^'\\]|\\.)*'|[^\s\[\]()]+))?"
+    r"\s*\[(?P<r0>\d+), (?P<c0>\d+)\] - \[(?P<r1>\d+), (?P<c1>\d+)\]\)\s*$"
+)
 
 
 def resolve_files(repo, patterns):
@@ -137,8 +158,66 @@ def resolve_files(repo, patterns):
     return uniq
 
 
+def split_parse_output(stdout, files):
+    """Pair `tree-sitter parse` output with the files it was given.
+
+    Each tree starts with an unindented `(` and its children are indented. A
+    file with a parse error is followed by a summary line that belongs to no
+    tree. Read as tree text, that line opens a second top-level node; kept as
+    the root, it replaced the whole tree with one error node, and every check
+    on that file then ran against nothing. The line is evidence all the same:
+    a MISSING token is usually anonymous, so the named-node tree does not show
+    it at all. It is attached to its tree instead of being dropped.
+    """
+    trees = []
+    for line in stdout.split("\n"):
+        if not line.strip():
+            continue
+        if line.startswith("("):
+            trees.append([[line], None])
+        elif "\tParse:" in line:
+            named = line.split("\tParse:")[0].strip()
+            owner = files[len(trees) - 1] if 0 < len(trees) <= len(files) else None
+            if owner is None or os.path.basename(named) != os.path.basename(owner):
+                raise SystemExit(
+                    f"parse output is misaligned: an error summary names {named!r} "
+                    f"where the tree belongs to {owner!r}. Check the CLI version.")
+            trees[-1][1] = _SUMMARY.match(line)
+        elif line[0].isspace() and trees:
+            trees[-1][0].append(line)
+        else:
+            raise SystemExit(
+                "unrecognised line in tree-sitter parse output; refusing to "
+                f"guess what it belongs to. Check the CLI version:\n  {line[:200]}")
+    if len(trees) != len(files):
+        raise SystemExit(
+            "parse output does not line up with the input file list "
+            f"({len(trees)} trees for {len(files)} files). "
+            "Re-run with a smaller --batch, or check the CLI version.")
+    pairs = []
+    for path, (lines, summary) in zip(files, trees):
+        tree = parse_sexp("\n".join(lines))
+        if tree is None:
+            raise SystemExit(f"could not read a tree for {path}")
+        if summary:
+            attach_first_error(tree, summary)
+        pairs.append((path, tree))
+    return pairs
+
+
+def attach_first_error(tree, m):
+    """Add the CLI's reported first error to the tree, unless already there."""
+    start = (int(m["r0"]), int(m["c0"]))
+    if any(n.type == m["type"] and n.start == start for n in tree.walk()):
+        return  # an ERROR, or a named MISSING node, the tree already shows
+    node = Node(m["type"], None, tree)
+    node.start, node.end = start, (int(m["r1"]), int(m["c1"]))
+    node.detail = m["what"]
+    tree.children.append(node)
+
+
 def parse_batch(repo, cli, files):
-    """Parse files in one CLI invocation; yield (path, Node) pairs."""
+    """Parse files in one CLI invocation; return (path, Node) pairs."""
     proc = subprocess.run(
         cli + ["parse"] + files,
         cwd=repo,
@@ -149,16 +228,7 @@ def parse_batch(repo, cli, files):
         raise SystemExit(
             "tree-sitter parse produced no output.\n" + proc.stderr.strip()
         )
-    chunks = re.split(r"^(?=\()", proc.stdout, flags=re.M)
-    chunks = [c for c in chunks if c.strip()]
-    if len(chunks) != len(files):
-        raise SystemExit(
-            "parse output does not line up with the input file list "
-            f"({len(chunks)} trees for {len(files)} files). "
-            "Re-run with a smaller --batch, or check the CLI version."
-        )
-    for path, chunk in zip(files, chunks):
-        yield path, parse_sexp(chunk)
+    return split_parse_output(proc.stdout, files)
 
 
 # --------------------------------------------------------------------------
@@ -167,15 +237,38 @@ def parse_batch(repo, cli, files):
 
 
 def source_lines(path, skip_re):
+    with open(path, encoding="utf-8", errors="replace") as fh:
+        return scrub_lines(fh.read(), skip_re)
+
+
+def scrub_lines(text, skip_re):
+    """(scrubbed, raw) per row. Rows split on newlines only, as tree-sitter's do."""
     lines = []
-    for raw in open(path, encoding="utf-8", errors="replace").read().splitlines():
+    for raw in text.split("\n"):
+        raw = raw.rstrip("\r")
         lines.append(("" if skip_re and skip_re.search(raw) else raw, raw))
     return lines
 
 
+def _types(value):
+    return set(value) if isinstance(value, list) else {value}
+
+
+def outermost(node, types):
+    """Descendants of the given types, without looking inside them."""
+    found, stack = [], list(node.children)
+    while stack:
+        d = stack.pop()
+        if d.type in types:
+            found.append(d)
+        else:
+            stack.extend(d.children)
+    return found
+
+
 def check_line_produces(inv, tree, lines):
     """Every line matching `line` must start a node of type `node`."""
-    want = set(inv["node"]) if isinstance(inv["node"], list) else {inv["node"]}
+    want = _types(inv["node"])
     rows = {n.start[0] for n in tree.walk() if n.type in want}
     pat = re.compile(inv["line"])
     hits = []
@@ -187,13 +280,14 @@ def check_line_produces(inv, tree, lines):
 
 def check_no_node(inv, tree, lines):
     """No node of the listed types may appear at all (ERROR / MISSING)."""
-    want = set(inv["node"]) if isinstance(inv["node"], list) else {inv["node"]}
+    want = _types(inv["node"])
     hits = []
     for n in tree.walk():
         if n.type in want:
             row = n.start[0]
             raw = lines[row][1].strip() if row < len(lines) else ""
-            hits.append((row + 1, f"{n.type}: {raw}"))
+            what = f"{n.type} {n.detail}" if n.detail else n.type
+            hits.append((row + 1, f"{what}: {raw}"))
     return hits
 
 
@@ -203,17 +297,27 @@ def check_span_guard(inv, tree, lines):
     This is the machine-checkable form of a boundary-preservation rule: a
     permissive body may look however it likes, but it may not swallow the
     following construct.
+
+    For a node holding one of the `check_after_last` types -- a region, say --
+    only the rows after the last one are checked. Rows up to its close belong
+    to the node's own header and to nested constructs, which are checked as
+    nodes of their own; a header wrapped across lines can legitimately start
+    a line with `%b = %y`. After the close nothing of the node's own is left
+    that could start such a line, so a body still running there has absorbed
+    the next construct. Exempting these nodes outright hid exactly that.
     """
-    want = set(inv["node"]) if isinstance(inv["node"], list) else {inv["node"]}
-    allow = set(inv.get("allow_if_child", []))
+    want = _types(inv["node"])
+    after = set(inv.get("check_after_last", []))
     pat = re.compile(inv["line"])
     hits = []
     for n in tree.walk():
         if n.type not in want or n.start[0] == n.end[0]:
             continue
-        if allow and n.has_descendant(allow):
-            continue
-        for row in range(n.start[0] + 1, min(n.end[0] + 1, len(lines))):
+        first = n.start[0] + 1
+        ends = [d.end[0] for d in outermost(n, after)] if after else []
+        if ends:
+            first = max(first, max(ends) + 1)
+        for row in range(first, min(n.end[0] + 1, len(lines))):
             scrubbed, raw = lines[row]
             if scrubbed and pat.search(scrubbed):
                 hits.append(
@@ -232,6 +336,47 @@ CHECKS = {
 
 
 # --------------------------------------------------------------------------
+# Measuring
+# --------------------------------------------------------------------------
+
+
+def read_bytes_lines(path):
+    """A file's rows as bytes: tree-sitter columns are byte offsets."""
+    with open(path, "rb") as fh:
+        return fh.read().split(b"\n")
+
+
+def node_text(node, lines):
+    """The source text a node spans, given its file's read_bytes_lines."""
+    (r0, c0), (r1, c1) = node.start, node.end
+    if r0 >= len(lines):
+        return ""
+    if r0 == r1:
+        chunk = lines[r0][c0:c1]
+    else:
+        tail = lines[r1][:c1] if r1 < len(lines) else b""
+        chunk = b"\n".join([lines[r0][c0:]] + lines[r0 + 1:r1] + [tail])
+    return chunk.decode("utf-8", "replace")
+
+
+def measure(tree, entry, lines):
+    """How much of `entry["node"]` a tree holds.
+
+    A plain node count by default. With `weight_regex`, a node whose text
+    matches counts as the integer the regex captures and any other node as
+    one -- so `%0:2` counts as the two results it binds, the same as `%a, %b`.
+    """
+    weight = re.compile(entry["weight_regex"]) if entry.get("weight_regex") else None
+    total = 0
+    for n in tree.walk():
+        if n.type != entry["node"]:
+            continue
+        m = weight.search(node_text(n, lines)) if weight else None
+        total += int(m.group(1)) if m else 1
+    return total
+
+
+# --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
 
@@ -247,6 +392,12 @@ def load_spec(path):
     for key in ("language", "files", "invariants"):
         if key not in spec:
             raise SystemExit(f"spec is missing required key: {key}")
+    for inv in spec["invariants"]:
+        if "allow_if_child" in inv:
+            raise SystemExit(
+                f"invariant {inv.get('id')!r} uses allow_if_child, which exempted "
+                "whole nodes and hid bodies that run on past their own region. "
+                "Use check_after_last instead.")
     return spec
 
 
@@ -258,7 +409,7 @@ def iter_trees(repo, spec, args):
         raise SystemExit(f"no files matched: {patterns}")
     # The CLI resolves a language from the grammar repository it runs in, so it
     # is run from there even when the files under audit live somewhere else --
-    # mlir-opt-normalized output, a bug report attachment, a consumer's
+    # reference-normalized output, a bug report attachment, a consumer's
     # sources. Paths handed to it are absolute, so the cwd only selects the
     # grammar.
     cwd = os.path.abspath(getattr(args, "grammar_repo", None) or repo)
@@ -266,8 +417,6 @@ def iter_trees(repo, spec, args):
     batch = args.batch
     for i in range(0, len(files), batch):
         for path, tree in parse_batch(cwd, cli, files[i:i + batch]):
-            if tree is None:
-                raise SystemExit(f"could not read a tree for {path}")
             yield path, tree, source_lines(path, skip_re)
 
 
@@ -280,6 +429,9 @@ def cmd_probe(args):
     ]
     if not selected:
         raise SystemExit(f"no invariant matched --id {args.id}")
+    for inv in selected:
+        if inv["kind"] not in CHECKS:
+            raise SystemExit(f"unknown invariant kind: {inv['kind']}")
 
     results = {inv["id"]: [] for inv in selected}
     n_files = 0
@@ -287,10 +439,7 @@ def cmd_probe(args):
         n_files += 1
         rel = os.path.relpath(path, repo)
         for inv in selected:
-            check = CHECKS.get(inv["kind"])
-            if check is None:
-                raise SystemExit(f"unknown invariant kind: {inv['kind']}")
-            for row, detail in check(inv, tree, lines):
+            for row, detail in CHECKS[inv["kind"]](inv, tree, lines):
                 results[inv["id"]].append((rel, row, detail))
 
     total = 0
@@ -363,7 +512,8 @@ def cmd_corpus(args):
         hits, n_cases, lost = [], 0, 0
         for path in files:
             rel = os.path.relpath(path, repo)
-            text = open(path, encoding="utf-8", errors="replace").read()
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
             for name, src, tree in split_corpus(text):
                 want = sum(1 for ln in src.splitlines() if pat.match(ln))
                 if not want:
@@ -403,18 +553,23 @@ def cmd_skeleton(args):
     There is no AST to diff against: a compiler's in-memory IR is what is left
     *after* parsing, with the surface syntax already consumed, so it has no
     node-for-node correspondence with a CST. What it does still agree on is the
-    skeleton -- how many operations, how many results each one binds, how the
-    regions and blocks nest. Those are decided by syntax and survive parsing.
+    skeleton -- how many results each operation binds, how the regions and
+    blocks nest. Those are decided by syntax and survive parsing.
 
     So rather than mapping a CST onto an IR (a second interpreter, which would
     then need verifying itself), normalize the input with the reference tool and
     parse *its* output with the same grammar. Both sides are then CSTs and the
     mapping is the identity. A disagreement is the grammar reading the program
-    differently from the language's own parser -- with no judgement call left.
+    differently from the language's own parser.
 
-    This only reaches inputs the reference tool accepts. Pass pipelines,
-    expected-error tests and split files are outside it, which is why the
-    broad ERROR/MISSING sweep still earns its place.
+    Compare quantities the printer preserves, not node counts that happen to
+    track them: a printer may regroup what the source spelled out, as MLIR's
+    generic form prints `%a, %b = ...` as `%0:2 = ...`. A spec entry's
+    `weight_regex` makes the count mean the quantity.
+
+    This only reaches inputs the reference tool accepts. Pass pipelines and
+    expected-error tests are outside it, which is why the broad ERROR/MISSING
+    sweep still earns its place.
     """
     import tempfile
 
@@ -473,22 +628,16 @@ def cmd_skeleton(args):
     files = resolve_files(repo, args.files or spec["files"])
     if args.limit:
         files = files[:args.limit]
-    counts_spec = norm.get("counts", [{"node": "op_result", "exact": True}])
+    counts_spec = norm.get("counts", [{"node": "op_result", "compare": "ranked"}])
 
-    def counts(tree):
-        c = {}
-        for n in tree.walk():
-            c[n.type] = c.get(n.type, 0) + 1
-        return c
-
-    rejected, compared, mismatches = 0, 0, []
-    informational = {}
+    rejected, compared = 0, 0
+    measured = [[] for _ in counts_spec]  # per entry: (rel, grammar, reference)
     with tempfile.TemporaryDirectory() as tmp:
         for i in range(0, len(files), args.batch):
             batch = files[i:i + args.batch]
             pairs = []
-            for src in batch:
-                dst = os.path.join(tmp, f"{len(pairs)}_{os.path.basename(src)}")
+            for j, src in enumerate(batch):
+                dst = os.path.join(tmp, f"{i + j}_{os.path.basename(src)}")
                 proc = subprocess.run(command + [src], capture_output=True,
                                       text=True)
                 if proc.returncode != 0 or not proc.stdout.strip():
@@ -503,16 +652,11 @@ def cmd_skeleton(args):
             gen = dict(parse_batch(repo, cli, [p[1] for p in pairs]))
             for src, dst in pairs:
                 compared += 1
-                co, cg = counts(orig[src]), counts(gen[dst])
+                lo, lg = read_bytes_lines(src), read_bytes_lines(dst)
                 rel = os.path.relpath(src, repo)
-                for entry in counts_spec:
-                    node = entry["node"]
-                    a, b = co.get(node, 0), cg.get(node, 0)
-                    if entry.get("compare") == "ranked":
-                        if a != b:
-                            mismatches.append((rel, node, a, b))
-                    else:
-                        informational.setdefault(node, []).append(b - a)
+                for k, entry in enumerate(counts_spec):
+                    measured[k].append((rel, measure(orig[src], entry, lo),
+                                        measure(gen[dst], entry, lg)))
 
     print(f"compared: {compared} file(s)   "
           f"not accepted by the reference tool: {rejected}")
@@ -530,44 +674,63 @@ def cmd_skeleton(args):
         )
         return 2
     if rejected:
-        print("  (pass pipelines, expected-error tests and split files are "
-              "outside this check by nature, not a parser signal)")
+        print("  (pass pipelines, expected-error tests and syntax from another "
+              "release are outside this check by nature, not a parser signal)")
     print()
-    for entry in counts_spec:
-        node = entry["node"]
-        if entry.get("compare") == "ranked":
-            bad = [m for m in mismatches if m[1] == node]
-            over = [m for m in bad if m[2] > m[3]]
-            under = sorted((m for m in bad if m[2] < m[3]),
-                           key=lambda m: m[2] - m[3])
-            status = "OK  " if not bad else "HIT "
-            print(f"{status} {node}: {len(bad)} of {compared} file(s) differ "
-                  f"from the reference parser")
-            if entry.get("why"):
-                print(f"     {entry['why'].strip()}")
-            if over:
-                print(f"     !! {len(over)} file(s) where the GRAMMAR FOUND MORE "
-                      f"than the reference -- always a defect, triage first:")
-                for rel, _n, a, b in over[:args.show]:
-                    print(f"        {rel}: grammar {a}, reference {b} "
-                          f"({a - b:+d})")
-            if under:
-                print(f"     {len(under)} file(s) where the grammar found fewer, "
-                      f"largest shortfall first:")
-                for rel, _n, a, b in under[:args.show]:
-                    print(f"        {rel}: grammar {a}, reference {b} "
-                          f"({a - b:+d})")
-                if len(under) > args.show:
-                    print(f"        ... {len(under) - args.show} more")
-                if entry.get("caveat"):
-                    print(f"     caveat: {entry['caveat'].strip()}")
-        else:
-            deltas = informational.get(node, [])
-            if deltas:
-                uniq = sorted(set(deltas))
-                print(f"--   {node}: delta {uniq[0]:+d}..{uniq[-1]:+d} "
-                      f"(informational; {entry.get('why', '').strip()})")
-    return 1 if mismatches else 0
+    differs = False
+    for entry, rows in zip(counts_spec, measured):
+        differs = report_counts(entry, rows, compared, args.show) or differs
+    return 1 if differs else 0
+
+
+def report_counts(entry, rows, compared, show):
+    """Print one compared quantity; return whether anything was flagged.
+
+    `rows` holds (file, grammar count, reference count). How to read a
+    difference depends on the entry's `compare`:
+
+    ranked   -- both directions are leads. Above the reference is always a
+                defect; below it is ranked, largest shortfall first.
+    ceiling  -- the reference may legitimately count more, for the reason in
+                `why`; that direction is summarised, not ranked. A grammar
+                count above it has no such reason and is flagged. Treating
+                both directions as noise hid a grammar that invents regions.
+    """
+    label = entry["node"] + (f", {entry['label']}" if entry.get("label") else "")
+    over = sorted((r for r in rows if r[1] > r[2]), key=lambda r: r[2] - r[1])
+    under = sorted((r for r in rows if r[1] < r[2]), key=lambda r: r[1] - r[2])
+    mode = entry.get("compare", "ranked")
+    if mode not in ("ranked", "ceiling"):
+        raise SystemExit(f"unknown compare mode for {entry['node']}: {mode}")
+    flagged = over if mode == "ceiling" else over + under
+
+    status = "HIT " if flagged else "OK  "
+    if mode == "ranked":
+        print(f"{status} {label}: {len(flagged)} of {compared} file(s) differ "
+              f"from the reference parser")
+    else:
+        print(f"{status} {label}: {len(over)} of {compared} file(s) above the "
+              f"reference; {len(under)} below it, as expected ({entry.get('why', '').strip()})")
+    if mode == "ranked" and entry.get("why") and flagged:
+        print(f"     {entry['why'].strip()}")
+    if over:
+        print(f"     !! {len(over)} file(s) where the GRAMMAR COUNTS MORE than the "
+              f"reference -- structure the language's parser does not see; "
+              f"triage first:")
+        for rel, a, b in over[:show]:
+            print(f"        {rel}: grammar {a}, reference {b} ({a - b:+d})")
+        if len(over) > show:
+            print(f"        ... {len(over) - show} more")
+    if mode == "ranked" and under:
+        print(f"     {len(under)} file(s) where the grammar counts fewer, "
+              f"largest shortfall first:")
+        for rel, a, b in under[:show]:
+            print(f"        {rel}: grammar {a}, reference {b} ({a - b:+d})")
+        if len(under) > show:
+            print(f"        ... {len(under) - show} more")
+        if entry.get("caveat"):
+            print(f"     caveat: {entry['caveat'].strip()}")
+    return bool(flagged)
 
 
 def cmd_census(args):
@@ -593,8 +756,10 @@ def cmd_census(args):
 
 
 def cmd_diff(args):
-    before = json.load(open(args.before, encoding="utf-8"))["files"]
-    after = json.load(open(args.after, encoding="utf-8"))["files"]
+    with open(args.before, encoding="utf-8") as fh:
+        before = json.load(fh)["files"]
+    with open(args.after, encoding="utf-8") as fh:
+        after = json.load(fh)["files"]
 
     common = set(before) & set(after)
 
