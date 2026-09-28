@@ -263,12 +263,16 @@ python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.j
 ```
 
 It normalizes each input with the reference tool, parses that output with the same
-grammar, and compares skeletons. Read it as a **ranked lead generator, not a gate**:
+grammar, and compares quantities the printer preserves — for MLIR, the results
+each file binds (counted so that `%0:2` is two, because the printer regroups
+`%a, %b`), and the operation, region and block counts. Read it as a **ranked lead
+generator, not a gate**:
 
-- **grammar count above reference** — always a defect; the grammar invented
-  structure the language's parser does not see. Open these first.
-- **grammar count below reference, large gap** — strong signal, and the top of the
-  list is where to look.
+- **grammar above the reference** — always a defect, on any quantity: the grammar
+  invented structure the language's parser does not see. Open these first.
+- **grammar below the reference, large gap** — a strong signal on a `ranked`
+  quantity, and the top of the list is where to look. On a `ceiling` quantity the
+  reference is expected to count more, for the reason the spec states.
 - **small gaps** — often a legitimate printing difference rather than a defect.
   `references/mlir.md` documents which ones, and why a green number here would be
   meaningless.
@@ -301,6 +305,8 @@ Three invariant kinds are available, and each maps onto a contract statement:
 - `no_node` — ERROR / MISSING must not appear, with locations.
 - `span_guard` — a node must not extend across a line that unambiguously starts the
   next sibling construct. This is boundary preservation in machine-checkable form.
+  With `check_after_last`, a node holding a region is checked after the region
+  closes; exempting such nodes outright hid bodies that ran on past their region.
 
 Keep invariants few, narrow and high-precision. An invariant that fires on ordinary
 correct code is worse than no invariant, because it trains you to skim the output.
