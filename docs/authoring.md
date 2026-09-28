@@ -75,6 +75,8 @@ description: 清楚说明这个 skill 做什么，以及遇到哪些请求时应
 python scripts/validate_skills.py
 ```
 
+skill 自带的确定性脚本如果有回归测试，放在同目录的 `scripts/test_*.py`，只用标准库，并随改动一起运行；CI 会逐个执行它们。
+
 随后更新 `skills/README.md` 中的目录说明，以及根 `README.md` 的 skill 列表。
 
 ## 6. 登记分类
