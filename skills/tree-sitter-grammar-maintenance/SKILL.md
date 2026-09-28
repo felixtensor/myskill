@@ -251,8 +251,8 @@ below from the skill directory, with `REPO` set to the grammar repository:
 REPO=~/Projects/tree-sitter-mlir     # wherever the checkout actually lives
 ```
 
-Add `--show 0` to any run for just the per-invariant summary line, and `--show N`
-to widen the per-file excerpts when a hit needs reading.
+Add `--show 0` to `probe`, `corpus`, `skeleton` or `diff` for summary lines only,
+and `--show N` to see more examples when a hit needs reading.
 
 **Compare against the reference parser first, where one exists:**
 

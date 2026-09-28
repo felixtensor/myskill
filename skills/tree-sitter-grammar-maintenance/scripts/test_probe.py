@@ -242,6 +242,22 @@ def count(tree, type_):
     return sum(1 for n in tree.walk() if n.type == type_)
 
 
+def call(argv):
+    """Run the command line; return (exit status, stdout)."""
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        status = probe.main(argv)
+    return status, out.getvalue()
+
+
+def write(path, text, executable=False):
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    if executable:
+        os.chmod(path, 0o755)
+    return path
+
+
 class ParseOutput(unittest.TestCase):
     FILES = ["/x/good.mlir", "/x/unclosed.mlir", "/x/grouped.mlir"]
     STDOUT = "\n".join([GOOD_TREE, UNCLOSED_TREE, UNCLOSED_SUMMARY, GROUPED_TREE]) + "\n"
@@ -259,7 +275,7 @@ class ParseOutput(unittest.TestCase):
         tree = probe.split_parse_output(self.STDOUT, self.FILES)[1][1]
         self.assertEqual(run("op-result-binding", tree, UNCLOSED_SRC), [])
         self.assertEqual(run("no-error-node", tree, UNCLOSED_SRC),
-                         [(4, 'MISSING "}": return')])
+                         [(4, 'MISSING "}": return', 'MISSING "}"')])
 
     def test_an_error_the_tree_already_shows_is_not_added_twice(self):
         stdout = ("(toplevel [0, 0] - [2, 0]\n  (ERROR [1, 2] - [1, 13]))\n"
@@ -290,6 +306,45 @@ class ParseOutput(unittest.TestCase):
         self.assertEqual(unexpected.children, [])
 
 
+class Invariants(unittest.TestCase):
+    def test_a_lost_binding_is_reported_with_what_swallowed_it(self):
+        self.assertEqual(run("op-result-binding", tree_of(LOST_TREE), LOST_SRC),
+                         [(2, "%res = arith.addi %cst0, %arg0 : i32",
+                           "value_use in custom_operation")])
+
+    def test_a_region_less_body_running_on_is_reported(self):
+        [(row, _, mode)] = run("custom-body-boundary", tree_of(LOST_TREE), LOST_SRC)
+        self.assertEqual((row, mode), (2, "custom_operation without a region"))
+
+    def test_a_body_running_past_its_region_is_reported(self):
+        [(row, _, mode)] = run("custom-body-boundary", tree_of(AFTER_REGION_TREE),
+                               AFTER_REGION_SRC)
+        self.assertEqual((row, mode), (4, "custom_operation running on after its region"))
+
+    def test_a_wrapped_header_is_not_a_binding(self):
+        for check in ("op-result-binding", "custom-body-boundary"):
+            self.assertEqual(run(check, tree_of(WRAPPED_TREE), WRAPPED_SRC), [], check)
+
+    def test_the_corpus_count_skips_operand_assignments(self):
+        pat = re.compile(SPEC["corpus_invariants"][0]["line"])
+        self.assertTrue(pat.match('%a, %b = "test.op"() : () -> (i32, i32)'))
+        self.assertFalse(pat.match("    %b = %y) -> (f32, f32) {"))
+
+    def test_examples_reach_across_files_first(self):
+        hits = [("a", 1), ("a", 2), ("a", 3), ("b", 1), ("c", 1)]
+        self.assertEqual(probe.examples(hits, 3), [("a", 1), ("b", 1), ("c", 1)])
+        self.assertEqual(len(probe.examples(hits, 10)), 5)
+
+    def test_the_retired_whole_node_exemption_is_refused(self):
+        spec = {"language": "x", "files": [], "invariants": [
+            {"id": "old", "kind": "span_guard", "node": "n", "line": "x",
+             "allow_if_child": ["region"]}]}
+        with tempfile.TemporaryDirectory() as tmp:
+            path = write(os.path.join(tmp, "spec.json"), json.dumps(spec))
+            with self.assertRaises(SystemExit):
+                probe.load_spec(path)
+
+
 class Skeleton(unittest.TestCase):
     def test_a_result_group_counts_as_its_size(self):
         [entry] = [e for e in SPEC["normalizer"]["counts"] if e["node"] == "op_result"]
@@ -301,10 +356,10 @@ class Skeleton(unittest.TestCase):
         self.assertEqual((count(tree_of(NAMED_TREE), "op_result"),
                           count(tree_of(GROUPED_TREE), "op_result")), (2, 1))
 
-    def report(self, entry, rows):
+    def report(self, entry, rows, show=5):
         out = io.StringIO()
         with contextlib.redirect_stdout(out):
-            flagged = probe.report_counts(entry, rows, len(rows), show=5)
+            flagged = probe.report_counts(entry, rows, len(rows), show)
         return flagged, out.getvalue()
 
     def test_a_ceiling_flags_only_the_grammar_counting_more(self):
@@ -320,43 +375,113 @@ class Skeleton(unittest.TestCase):
         self.assertFalse(self.report(entry, [("a.mlir", 2, 2)])[0])
         self.assertTrue(self.report(entry, [("a.mlir", 2, 3)])[0])
 
+    def test_show_zero_prints_the_summary_line_only(self):
+        entry = {"node": "op_result", "compare": "ranked"}
+        _, text = self.report(entry, [("a.mlir", 2, 3), ("b.mlir", 5, 4)], show=0)
+        self.assertEqual(text.strip().splitlines(), [
+            "HIT  op_result: 2 of 2 file(s) differ from the reference parser, "
+            "1 above it and 1 below"])
+
     def test_an_unknown_compare_mode_is_refused(self):
         with self.assertRaises(SystemExit):
             self.report({"node": "x", "compare": "informational"}, [("a.mlir", 1, 1)])
 
+    def test_a_limit_spreads_across_the_set(self):
+        self.assertEqual(probe.spread_sample(list(range(100)), 4), [0, 25, 50, 75])
+        self.assertEqual(probe.spread_sample([1, 2], 5), [1, 2])
 
-class Invariants(unittest.TestCase):
-    def test_a_lost_binding_is_reported(self):
-        self.assertEqual(run("op-result-binding", tree_of(LOST_TREE), LOST_SRC),
-                         [(2, "%res = arith.addi %cst0, %arg0 : i32")])
+    def test_an_undeclared_tool_is_refused_with_the_spec_hint(self):
+        with self.assertRaises(SystemExit) as caught:
+            probe.declared_tool(None, SPEC["normalizer"])
+        self.assertIn("mlir-opt", str(caught.exception.code))
 
-    def test_a_region_less_body_running_on_is_reported(self):
-        hits = run("custom-body-boundary", tree_of(LOST_TREE), LOST_SRC)
-        self.assertEqual([row for row, _ in hits], [2])
-
-    def test_a_body_running_past_its_region_is_reported(self):
-        hits = run("custom-body-boundary", tree_of(AFTER_REGION_TREE), AFTER_REGION_SRC)
-        self.assertEqual([row for row, _ in hits], [4])
-
-    def test_a_wrapped_header_is_not_a_binding(self):
-        for check in ("op-result-binding", "custom-body-boundary"):
-            self.assertEqual(run(check, tree_of(WRAPPED_TREE), WRAPPED_SRC), [], check)
-
-    def test_the_corpus_count_skips_operand_assignments(self):
-        pat = re.compile(SPEC["corpus_invariants"][0]["line"])
-        self.assertTrue(pat.match('%a, %b = "test.op"() : () -> (i32, i32)'))
-        self.assertFalse(pat.match("    %b = %y) -> (f32, f32) {"))
-
-    def test_the_retired_whole_node_exemption_is_refused(self):
-        spec = {"language": "x", "files": [], "invariants": [
-            {"id": "old", "kind": "span_guard", "node": "n", "line": "x",
-             "allow_if_child": ["region"]}]}
+    def test_a_tool_failing_the_self_check_is_refused(self):
         with tempfile.TemporaryDirectory() as tmp:
-            path = os.path.join(tmp, "spec.json")
-            with open(path, "w", encoding="utf-8") as fh:
-                json.dump(spec, fh)
+            wrong = write(os.path.join(tmp, "opt"), "#!/bin/sh\necho 'define void @f()'\n",
+                          executable=True)
             with self.assertRaises(SystemExit):
-                probe.load_spec(path)
+                probe.run_self_check(wrong, SPEC["normalizer"], SPEC, tmp)
+            right = write(os.path.join(tmp, "mlir-opt"),
+                          "#!/bin/sh\necho '\"func.func\"() ({}) : () -> ()'\n",
+                          executable=True)
+            probe.run_self_check(right, SPEC["normalizer"], SPEC, tmp)
+
+    def test_a_comparison_of_nothing_is_not_a_pass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "examples"))
+            write(os.path.join(tmp, "examples", "pipeline.mlir"), "// RUN: a pass pipeline\n")
+            # Passes the self-check, then declines every real input.
+            tool = write(os.path.join(tmp, "mlir-opt"), (
+                "#!/bin/sh\n"
+                "case \"$*\" in *self-check*) echo '\"func.func\"() ({}) : () -> ()';;"
+                " *) exit 1;; esac\n"), executable=True)
+            spec = os.path.join(HERE, "..", "assets", "invariants", "mlir.json")
+            status, text = call(["skeleton", "--repo", tmp, "--spec", spec, "--tool", tool])
+        self.assertEqual(status, 2)
+        self.assertIn("NOTHING WAS COMPARED", text)
+
+
+class Census(unittest.TestCase):
+    def test_a_shape_change_with_equal_counts_is_a_blast_radius(self):
+        before = tree_of("(toplevel [0, 0] - [2, 0]\n  (operation [0, 0] - [0, 9]))")
+        after = tree_of("(toplevel [0, 0] - [2, 0]\n  (operation [0, 0] - [1, 5]))")
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = []
+            for name, tree in (("before", before), ("after", after)):
+                counts, shape = probe.census_entry(tree)
+                payload = {"language": "x", "files": {"f.mlir": counts},
+                           "shapes": {"f.mlir": shape}}
+                paths.append(write(os.path.join(tmp, name + ".json"), json.dumps(payload)))
+            status, text = call(["diff"] + paths)
+        self.assertEqual(status, 1)
+        self.assertIn("same counts, different shape (a span, parent or field moved): 1",
+                      text)
+
+    def test_an_identical_census_is_inert(self):
+        counts, shape = probe.census_entry(tree_of(GOOD_TREE))
+        payload = json.dumps({"language": "x", "files": {"f": counts},
+                              "shapes": {"f": shape}})
+        with tempfile.TemporaryDirectory() as tmp:
+            a = write(os.path.join(tmp, "a.json"), payload)
+            b = write(os.path.join(tmp, "b.json"), payload)
+            self.assertEqual(call(["diff", a, b])[0], 0)
+
+
+class Provenance(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.repo = self.tmp.name
+        write(os.path.join(self.repo, "package-lock.json"), json.dumps(
+            {"packages": {"node_modules/tree-sitter-cli": {"version": "0.27.0"}}}))
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def spec_with_cli(self, version):
+        cli = write(os.path.join(self.repo, "fake-cli"),
+                    f"#!/bin/sh\necho 'tree-sitter {version}'\n", executable=True)
+        return write(os.path.join(self.repo, "spec.json"), json.dumps(
+            {"language": "x", "files": [], "invariants": [], "cli": [cli]}))
+
+    def test_a_cli_matching_the_lock_is_recorded(self):
+        status, text = call(["provenance", "--repo", self.repo,
+                             "--spec", self.spec_with_cli("0.27.0")])
+        self.assertEqual(status, 0)
+        self.assertIn("- **CLI version:** `0.27.0`, lock says `0.27.0`", text)
+        self.assertIn("the reference comparison did not run", text)
+
+    def test_a_cli_drifted_from_the_lock_is_flagged(self):
+        status, text = call(["provenance", "--repo", self.repo,
+                             "--spec", self.spec_with_cli("0.26.12")])
+        self.assertEqual(status, 1)
+        self.assertIn("MISMATCH", text)
+
+    def test_a_repository_without_a_lock_file_says_so(self):
+        os.remove(os.path.join(self.repo, "package-lock.json"))
+        write(os.path.join(self.repo, "package.json"),
+              json.dumps({"devDependencies": {"tree-sitter-cli": "^0.26.11"}}))
+        self.assertIsNone(probe.locked_cli(self.repo)[0])
+        self.assertIn("^0.26.11", probe.locked_cli(self.repo)[1])
 
 
 if __name__ == "__main__":
