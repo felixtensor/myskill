@@ -1,11 +1,10 @@
 # Maintaining `docs/` as a contract, in both directions
 
-
 The documents under `docs/` are the instrument this whole method depends on. Treat
 them as load-bearing, and audit them both ways.
 
 **Forward — does the parser still honour what the document promises?** That is
-Parts 2 through 6.
+`SKILL.md` Parts 3 through 6.
 
 **Backward — does the document still describe the code?** Every factual claim in
 the contract needs a command that confirms it. Run these whenever you touch the
@@ -32,7 +31,7 @@ next to it, not just its existence. Update `docs/QUERIES.md` too whenever node
 names or capture choices move — it is the consumer-facing half of the same
 contract.
 
-**And hold the line from Part 1.** Updating a table to match reality is
+**And hold the line from `SKILL.md` Part 2.** Updating a table to match reality is
 maintenance. Editing a principle so a patch becomes acceptable is not maintenance,
 and is not yours to do.
 

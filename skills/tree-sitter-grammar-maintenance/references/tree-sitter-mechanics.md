@@ -119,21 +119,19 @@ This is the common loop, and the order matters.
 3. **If the expectation was wrong, fix that one case by hand** and say why it was
    wrong. Do not reach for `--update`.
 4. **If the parser is wrong**, fix the grammar, then regenerate and read the whole
-   diff. A mechanical direction check helps here: count node types before and after
-   and confirm only the ones you intended moved. A change that touches exactly one
-   node type is almost certainly the correction; a change that moves five is not.
+   diff. A mechanical direction check helps here: take a `probe.py census` before
+   and after, and confirm with `diff` that only the node types you intended moved.
+   A change that touches exactly one node type is almost certainly the correction;
+   a change that moves five is not. `diff` also lists files whose shape moved while
+   every count stayed put — read those too.
 5. **`tree-sitter test --update` is a bulk operation with no judgement in it.** It
    will happily record a defect as the expected result, and once it does, every gate
    agrees with the bug. Use it only after step 4, and read every hunk.
 
 ## When the parser disagrees with the language's own compiler
 
-Prefer the real parser over a hand-written approximation of it. See
-`references/mlir.md` for the MLIR setup; the general shape is: normalize the input
-with the reference tool, parse the tool's output with the same grammar, and compare
-skeletons. Both sides are then CSTs produced by the same parser, so the comparison
-needs no mapping layer — and the reference side encodes the language's own answer
-rather than your guess at it.
+Prefer the real parser over a hand-written approximation of it. `SKILL.md` Part 1
+has the method and `references/mlir.md` the MLIR setup.
 
 ## Sources
 

@@ -10,10 +10,12 @@ review. Do neither more nor less than this:
    can tell a parser regression from a change in the input.
 2. **Take a census before and after the sync.** The diff separates the two things
    that just happened: files that are new, and files that existed before and now
-   parse differently. The second group is the only one that can indicate a
-   regression, and there should normally be none.
+   parse differently — by count or by shape. The second group is the only one that
+   can indicate a regression, and there should normally be none.
 3. **Run the parse gate and cluster failures by mode**, not by file. Ten files
-   failing on the same construct are one finding.
+   failing on the same construct are one finding. `probe.py probe` does the
+   clustering: its `no-error-node` hits are grouped by what is missing or where the
+   ERROR sits, with examples from different files.
 4. **Read only the new failures**, plus structures already known to be risky and any
    syntax you were planning to support. Files that failed before and still fail the
    same way are not new information.
