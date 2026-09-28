@@ -407,9 +407,12 @@ npm run fuzz                   # where it exists: scanner, generated-parser, cor
 for q in queries/*.scm; do npx tree-sitter query "$q" "$SAMPLE" --quiet || echo "FAILED: $q"; done
 ```
 
-Then rerun the probes from Part 3 and diff the census. Compile **every** shipped
-query, not just `highlights.scm` — node-name drift breaks `locals`, `tags`, `folds`
-and `indents` silently, and those have no fixtures.
+Then rerun the probes from Part 3 and diff the census; with a reference parser,
+also `diff` a `skeleton --out` run from before against one from after. A file may
+only move closer to the reference: moving further, landing above it, or a moved
+reference side (the generic path, your control) needs an explanation. Compile
+**every** shipped query, not just `highlights.scm` — node-name drift breaks
+`locals`, `tags`, `folds` and `indents` silently, and those have no fixtures.
 
 **Never skip fuzz on a change that touches ambiguity resolution.** A precedence or
 conflict change can be correct on a full parse and wrong under editing: incremental

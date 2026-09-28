@@ -261,6 +261,11 @@ python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.j
 python3 scripts/probe.py skeleton --repo "$REPO" --spec assets/invariants/mlir.json --tool "$TOOL" --limit 60
 ```
 
+Around a fix, compare two saved runs instead of two totals: `skeleton --out` before
+and after, then `diff`. It names the files that moved closer, the ones that moved
+further or landed above the reference, and any whose reference side moved — which is
+the generic-form control of the worked must-fix below, checked on every file at once.
+
 ### What is comparable, and what is not
 
 | Quantity | Comparable? |

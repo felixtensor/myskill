@@ -14,11 +14,11 @@ repository.
 
 Usage:
     probe.py provenance --repo DIR [--spec FILE] [--tool PATH]
-    probe.py skeleton   --repo DIR --spec FILE --tool PATH [--limit N]
+    probe.py skeleton   --repo DIR --spec FILE --tool PATH [--limit N] [--out FILE]
     probe.py corpus     --repo DIR --spec FILE
     probe.py probe      --repo DIR --spec FILE [--id ID]... [--files GLOB]
     probe.py census     --repo DIR --spec FILE --out FILE
-    probe.py diff       BEFORE.json AFTER.json
+    probe.py diff       BEFORE.json AFTER.json   (two censuses or two skeletons)
 
 Exit status: 0 when every selected check holds, 1 on any hit, 2 on a tooling
 or configuration failure, including a comparison that compared nothing. A hit
@@ -990,10 +990,11 @@ def cmd_skeleton(args):
         # One tool process per file, side by side; map keeps input order.
         with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
             outputs = list(pool.map(normalize, files))
-        pairs = []
+        pairs, declined = [], []
         for k, (src, out) in enumerate(zip(files, outputs)):
             if out is None:
                 rejected += 1
+                declined.append(os.path.relpath(src, repo))
                 continue
             dst = os.path.join(tmp, f"{k}_{os.path.basename(src)}")
             with open(dst, "w", encoding="utf-8") as fh:
@@ -1026,11 +1027,93 @@ def cmd_skeleton(args):
         print("  (inputs the tool declines -- pass pipelines, expected-error "
               "tests, syntax from another release -- are a coverage limit, "
               "not a parser signal)")
+    if args.out:
+        write_skeleton(args.out, spec, tool, version, counts_spec, measured,
+                       declined)
+        print(f"  -> {args.out}")
     print()
     differs = False
     for entry, rows in zip(counts_spec, measured):
         differs = report_counts(entry, rows, compared, args.show) or differs
     return 1 if differs else 0
+
+
+def write_skeleton(out, spec, tool, version, counts_spec, measured, declined):
+    """Save one skeleton run for `diff`: a scratch file, like a census."""
+    files = {}
+    for rows in measured:
+        for rel, grammar, reference in rows:
+            files.setdefault(rel, []).append([grammar, reference])
+    payload = {
+        "kind": "skeleton",
+        "language": spec["language"],
+        "tool": tool,
+        "tool_version": version,
+        "counts": [{"node": e["node"], "label": e.get("label"),
+                    "compare": e.get("compare", "ranked")} for e in counts_spec],
+        "declined": declined,
+        "files": files,
+    }
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(payload, fh, indent=1, sort_keys=True)
+
+
+def diff_skeletons(before, after, show):
+    """Compare two skeleton runs taken around a grammar change.
+
+    Per file and quantity, the gap is grammar minus reference, and a fix
+    should only move gaps towards zero. Three things say otherwise, and each
+    is flagged: a file whose reference side moved, a file that moved further
+    from the reference, and a file newly above it. The reference side is the
+    grammar reading the tool's generic output, so a change there means the
+    edit reached the generic path the whole comparison stands on -- the
+    control that must not move. Further, on a `ceiling` quantity, is also
+    how a newly swallowed operation shows: no single run can see it.
+    """
+    keys_b = [(e["node"], e.get("label")) for e in before["counts"]]
+    keys_a = [(e["node"], e.get("label")) for e in after["counts"]]
+    fb, fa = before["files"], after["files"]
+    common = sorted(set(fb) & set(fa))
+    print(f"skeleton diff: {len(common)} file(s) compared in both runs")
+    worse = False
+    for key in (k for k in keys_b if k in keys_a):
+        i, j = keys_b.index(key), keys_a.index(key)
+        moved, above, further, closer = [], [], [], []
+        for rel in common:
+            (gb, rb), (ga, ra) = fb[rel][i], fa[rel][j]
+            if rb != ra:
+                moved.append((rel, f"reference {rb} -> {ra}", abs(ra - rb)))
+            elif ga > ra and gb <= rb:
+                above.append((rel, f"gap {gb - rb:+d} -> {ga - ra:+d}", ga - ra))
+            elif abs(ga - ra) > abs(gb - rb):
+                further.append((rel, f"gap {gb - rb:+d} -> {ga - ra:+d}",
+                                abs(ga - ra) - abs(gb - rb)))
+            elif abs(ga - ra) < abs(gb - rb):
+                closer.append((rel, f"gap {gb - rb:+d} -> {ga - ra:+d}",
+                               abs(gb - rb) - abs(ga - ra)))
+        bad = bool(moved or above or further)
+        worse = worse or bad
+        label = key[0] + (f", {key[1]}" if key[1] else "")
+        print(f"{'HIT ' if bad else 'OK  '} {label}: {len(closer)} closer, "
+              f"{len(further)} further, {len(above)} newly above the "
+              f"reference, reference side moved in {len(moved)}")
+        for title, rows in (
+                ("reference side moved -- the change reached the generic path",
+                 moved),
+                ("newly above the reference -- always a defect", above),
+                ("further from the reference", further),
+                ("closer to the reference", closer)):
+            if rows and show:
+                print(f"     {title}:")
+                for rel, what, _size in sorted(rows, key=lambda r: -r[2])[:show]:
+                    print(f"        {rel}: {what}")
+                if len(rows) > show:
+                    print(f"        ... {len(rows) - show} more")
+    only = len(set(fb) ^ set(fa))
+    if only:
+        print(f"\ncompared in one run only: {only} file(s) -- a different "
+              "tool, or inputs that moved; no parser signal")
+    return 1 if worse else 0
 
 
 def report_counts(entry, rows, compared, show):
@@ -1099,7 +1182,8 @@ def cmd_census(args):
         census[rel], shapes[rel] = counts, shape
     # The shapes are digests for one before/after comparison, written to a
     # scratch path -- not a baseline, and never kept in the repository.
-    payload = {"language": spec["language"], "files": census, "shapes": shapes}
+    payload = {"kind": "census", "language": spec["language"],
+               "files": census, "shapes": shapes}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=1, sort_keys=True)
     total = {}
@@ -1116,6 +1200,11 @@ def cmd_diff(args):
         b_payload = json.load(fh)
     with open(args.after, encoding="utf-8") as fh:
         a_payload = json.load(fh)
+    kinds = {p.get("kind", "census") for p in (b_payload, a_payload)}
+    if len(kinds) > 1:
+        raise SystemExit("cannot diff a census against a skeleton run")
+    if kinds == {"skeleton"}:
+        return diff_skeletons(b_payload, a_payload, args.show)
     before, after = b_payload["files"], a_payload["files"]
     b_shapes, a_shapes = b_payload.get("shapes", {}), a_payload.get("shapes", {})
 
@@ -1212,6 +1301,8 @@ def main(argv=None):
         help="compare the grammar against the language's reference parser")
     common(p)
     p.add_argument("--tool", help="the reference parser the user declared")
+    p.add_argument("--out",
+                   help="also save the run here, for `diff` against another")
     p.add_argument("--limit", type=int,
                    help="compare N files spread evenly across the set")
     p.add_argument("--show", type=int, default=10,
@@ -1239,7 +1330,7 @@ def main(argv=None):
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_census)
 
-    p = sub.add_parser("diff", help="diff two censuses")
+    p = sub.add_parser("diff", help="diff two censuses, or two skeleton runs")
     p.add_argument("before")
     p.add_argument("after")
     p.add_argument("--show", type=int, default=20,
