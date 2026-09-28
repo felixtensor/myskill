@@ -60,13 +60,16 @@
     }
   ],
   "normalizer": {
-    "command": [
-      "mlir-opt",
+    "args": [
       "--allow-unregistered-dialect",
       "--mlir-print-op-generic",
       "--split-input-file"
     ],
-    "why": "Generic form is MLIR's own answer to the program's structure. The grammar parses generic form precisely (principle 2), so parsing mlir-opt's output with the same grammar turns an IR-versus-CST comparison into CST-versus-CST, where the mapping is the identity. --split-input-file raises coverage from 99/150 to 126/150 because the upstream tests are full of `// -----` chunks. --no-implicit-module was measured and rejected: it drops coverage to 52/150.",
+    "self_check": {
+      "input": "func.func @__probe__() {\n  return\n}\n",
+      "expect": "\"func.func\""
+    },
+    "tool_hint": "any MLIR-based project's opt tool: mlir-opt, circt-opt, triton-opt, iree-opt ...; the version need not match the pinned examples",
     "counts": [
       {
         "node": "op_result",
@@ -91,9 +94,6 @@
         "compare": "ceiling",
         "why": "generic form materializes entry block labels the custom form omits"
       }
-    ],
-    "also_accept_why": "Any MLIR-based project's opt tool parses core MLIR and prints generic form, so any of them serves as the reference for the shared syntax. A downstream one additionally registers its own dialects, which raises how many files it accepts. Order is preference, not requirement; --tool overrides all of them.",
-    "tool_is_declared_not_discovered": "The reference parser is never searched for. `opt` on PATH is LLVM's IR optimiser, not an MLIR tool, and an arbitrary mlir-opt build may not register the dialects this repository needs -- either would yield a comparison that looks authoritative while resting on a binary nobody chose. The user declares it with --tool; probe.py then round-trips a trivial function through it and refuses if that fails.",
-    "accepted_tools_for_reference": "Any MLIR-based project's opt tool: mlir-opt, circt-opt, triton-opt, iree-opt, tpp-opt and so on. They all parse core MLIR and print generic form, which is the only part this comparison uses; a downstream one also registers its own dialects, which raises how many files it accepts."
+    ]
   }
 }

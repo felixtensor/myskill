@@ -167,16 +167,12 @@ examples use. Both would yield numbers that look authoritative while resting on 
 binary nobody chose, which destroys the one property that makes this evidence worth
 more than a hand-written pattern: you know what produced it.
 
-So the user declares it, and `probe.py` verifies the declaration by round-tripping
-a trivial function through it before trusting anything:
-
-```bash
-python3 scripts/probe.py skeleton --repo "$REPO" \
-  --spec assets/invariants/mlir.json --tool /path/to/mlir-opt --verbose-tool
-```
-
-`--verbose-tool` prints the resolved path, which belongs in the audit record so the
-next pass can reuse it instead of asking again.
+So the user declares it, and `probe.py` verifies the declaration before trusting
+anything: the spec's self-check normalizes a trivial `func.func` and expects
+`"func.func"` in the output, which LLVM's `opt` and a Clang driver both fail. The
+skeleton report opens with the resolved absolute path and version, and
+`probe.py provenance --tool "$TOOL"` prints the same line for the audit record, so
+the next pass can reuse it instead of asking again.
 
 Any MLIR-based project's opt tool serves: `mlir-opt`, `circt-opt`, `triton-opt`,
 `iree-opt`, `tpp-opt`. They all parse core MLIR and print generic form, which is the

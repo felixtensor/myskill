@@ -13,11 +13,12 @@ S-expression output. Standard library only; nothing is written into the parser
 repository.
 
 Usage:
-    probe.py skeleton --repo DIR --spec FILE --tool PATH [--limit N]
-    probe.py corpus   --repo DIR --spec FILE
-    probe.py probe    --repo DIR --spec FILE [--id ID]... [--files GLOB]
-    probe.py census   --repo DIR --spec FILE --out FILE
-    probe.py diff     BEFORE.json AFTER.json
+    probe.py provenance --repo DIR [--spec FILE] [--tool PATH]
+    probe.py skeleton   --repo DIR --spec FILE --tool PATH [--limit N]
+    probe.py corpus     --repo DIR --spec FILE
+    probe.py probe      --repo DIR --spec FILE [--id ID]... [--files GLOB]
+    probe.py census     --repo DIR --spec FILE --out FILE
+    probe.py diff       BEFORE.json AFTER.json
 
 Exit status: 0 when every selected check holds, 1 on any hit, 2 on a tooling
 or configuration failure, including a comparison that compared nothing. A hit
@@ -28,13 +29,20 @@ language's contract document.
 from __future__ import annotations
 
 import argparse
+import datetime
 import glob as globlib
+import hashlib
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
+
+DEFAULT_CLI = ["npx", "--no-install", "tree-sitter"]
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+MAX_MODES = 10
 
 # --------------------------------------------------------------------------
 # S-expression tree
@@ -131,6 +139,32 @@ def parse_sexp(text):
     return root
 
 
+def deepest_at(node, point):
+    """The innermost node whose span contains `point` (row, byte column)."""
+    while True:
+        for c in node.children:
+            if c.start <= point < c.end:
+                node = c
+                break
+        else:
+            return node
+
+
+def shape_digest(node):
+    """A short hash of a tree's named nodes, fields and ranges, in order."""
+    h = hashlib.sha1()
+    stack = [node]
+    while stack:
+        n = stack.pop()
+        if n is None:
+            h.update(b")")
+            continue
+        h.update(f"({n.field or ''}:{n.type}{n.start}{n.end}{n.detail or ''}".encode())
+        stack.append(None)
+        stack.extend(reversed(n.children))
+    return h.hexdigest()[:16]
+
+
 # --------------------------------------------------------------------------
 # Parsing a file set
 # --------------------------------------------------------------------------
@@ -156,6 +190,19 @@ def resolve_files(repo, patterns):
             seen.add(f)
             uniq.append(f)
     return uniq
+
+
+def spread_sample(files, n):
+    """n files evenly spaced through the list, rather than the first n.
+
+    Sorted paths cluster by directory, so the first n would cover a few
+    dialects only. Evenly spaced picks reach across the set and stay
+    deterministic, so two runs with the same --limit compare the same files.
+    """
+    if not n or n >= len(files):
+        return files
+    step = len(files) / n
+    return [files[int(k * step)] for k in range(n)]
 
 
 def split_parse_output(stdout, files):
@@ -266,15 +313,27 @@ def outermost(node, types):
     return found
 
 
+# Each check returns (row, detail, mode) per hit. The mode names what the hit
+# looks like structurally, so that a thousand hits with one cause read as one
+# finding: triage clusters, not files.
+
+
 def check_line_produces(inv, tree, lines):
-    """Every line matching `line` must start a node of type `node`."""
+    """Every line matching `line` must start a node of type `node`.
+
+    The mode is the innermost node that holds the line's first token instead
+    -- `value_use in custom_operation` for a binding a body swallowed.
+    """
     want = _types(inv["node"])
     rows = {n.start[0] for n in tree.walk() if n.type in want}
     pat = re.compile(inv["line"])
     hits = []
     for row, (scrubbed, raw) in enumerate(lines):
         if scrubbed and pat.search(scrubbed) and row not in rows:
-            hits.append((row + 1, raw.strip()))
+            holder = deepest_at(tree, (row, len(raw) - len(raw.lstrip())))
+            mode = (f"{holder.type} in {holder.parent.type}" if holder.parent
+                    else f"nothing below {holder.type}")
+            hits.append((row + 1, raw.strip(), mode))
     return hits
 
 
@@ -287,7 +346,9 @@ def check_no_node(inv, tree, lines):
             row = n.start[0]
             raw = lines[row][1].strip() if row < len(lines) else ""
             what = f"{n.type} {n.detail}" if n.detail else n.type
-            hits.append((row + 1, f"{what}: {raw}"))
+            mode = what if n.detail else (
+                f"{n.type} in {n.parent.type}" if n.parent else n.type)
+            hits.append((row + 1, f"{what}: {raw}", mode))
     return hits
 
 
@@ -307,22 +368,25 @@ def check_span_guard(inv, tree, lines):
     the next construct. Exempting these nodes outright hid exactly that.
     """
     want = _types(inv["node"])
-    after = set(inv.get("check_after_last", []))
+    after = sorted(set(inv.get("check_after_last", [])))
     pat = re.compile(inv["line"])
     hits = []
     for n in tree.walk():
         if n.type not in want or n.start[0] == n.end[0]:
             continue
         first = n.start[0] + 1
-        ends = [d.end[0] for d in outermost(n, after)] if after else []
+        ends = [d.end[0] for d in outermost(n, set(after))] if after else []
         if ends:
             first = max(first, max(ends) + 1)
+            mode = f"{n.type} running on after its {'/'.join(after)}"
+        else:
+            mode = n.type + (f" without a {'/'.join(after)}" if after else "")
         for row in range(first, min(n.end[0] + 1, len(lines))):
             scrubbed, raw = lines[row]
             if scrubbed and pat.search(scrubbed):
                 hits.append(
                     (row + 1, f"absorbed into {n.type} opened on line "
-                              f"{n.start[0] + 1}: {raw.strip()}")
+                              f"{n.start[0] + 1}: {raw.strip()}", mode)
                 )
                 break
     return hits
@@ -333,6 +397,21 @@ CHECKS = {
     "no_node": check_no_node,
     "span_guard": check_span_guard,
 }
+
+
+def examples(hits, n):
+    """Up to n hits, one per file before any file gets a second."""
+    by_file = {}
+    for h in hits:
+        by_file.setdefault(h[0], []).append(h)
+    queues = sorted(by_file.values(), key=len, reverse=True)
+    out, depth = [], 0
+    while len(out) < n and any(depth < len(q) for q in queues):
+        for q in queues:
+            if depth < len(q) and len(out) < n:
+                out.append(q[depth])
+        depth += 1
+    return out
 
 
 # --------------------------------------------------------------------------
@@ -376,6 +455,150 @@ def measure(tree, entry, lines):
     return total
 
 
+def census_entry(tree):
+    """A file's node counts and the digest of its shape."""
+    counts = {}
+    for n in tree.walk():
+        counts[n.type] = counts.get(n.type, 0) + 1
+    return counts, shape_digest(tree)
+
+
+# --------------------------------------------------------------------------
+# Tools and provenance
+# --------------------------------------------------------------------------
+
+
+def _run(cmd, cwd=None):
+    """stdout of a command that succeeded, stripped; None otherwise."""
+    try:
+        proc = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True,
+                              timeout=120)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    return proc.stdout.strip() if proc.returncode == 0 else None
+
+
+def resolve_tool(tool):
+    """Absolute path of a declared tool, or None if it cannot be executed."""
+    if os.path.isfile(tool) and os.access(tool, os.X_OK):
+        return os.path.abspath(tool)
+    found = shutil.which(tool)
+    return os.path.abspath(found) if found else None
+
+
+def tool_version(tool):
+    """The line of `tool --version` that names a version, if any."""
+    try:
+        proc = subprocess.run([tool, "--version"], capture_output=True,
+                              text=True, timeout=60)
+    except (OSError, subprocess.TimeoutExpired):
+        return ""
+    lines = [ln.strip() for ln in (proc.stdout + proc.stderr).splitlines()
+             if ln.strip()]
+    for ln in lines:
+        if "version" in ln.lower():
+            return ln
+    return lines[0] if lines else ""
+
+
+def declared_tool(tool, norm):
+    """The reference parser the user declared, verified; never a search."""
+    if not tool:
+        hint = norm.get("tool_hint", "the language's own parser")
+        raise SystemExit(
+            "no reference parser declared.\n"
+            "Do NOT search for one. A comparison against a binary nobody chose\n"
+            "reads as authoritative while resting on nothing; the value of this\n"
+            "evidence is that its provenance is known.\n\n"
+            f"Ask the user which tool to use -- {hint} --\n"
+            "then pass it with --tool, and record the path in the audit record\n"
+            "so the next pass can reuse it.")
+    path = resolve_tool(tool)
+    if path is None:
+        raise SystemExit(
+            f"declared reference parser is not executable: {tool}\n"
+            "Confirm the path with the user rather than substituting another.")
+    return path
+
+
+def run_self_check(tool, norm, spec, tmp):
+    """Refuse a declared tool that is not the kind of tool the spec needs.
+
+    A wrong answer to "which tool?" must fail loudly here instead of quietly
+    producing numbers: LLVM's `opt`, for one, is not an MLIR tool at all.
+    """
+    check = norm.get("self_check")
+    if not check:
+        raise SystemExit(
+            "the spec's normalizer declares no self_check; a declared tool must "
+            "be verified before its output is trusted")
+    ext = os.path.splitext(spec["files"][0])[1] if spec.get("files") else ""
+    path = os.path.join(tmp, "self-check" + ext)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(check["input"])
+    proc = subprocess.run([tool] + norm.get("args", []) + [path],
+                          capture_output=True, text=True)
+    if proc.returncode != 0 or check["expect"] not in proc.stdout:
+        raise SystemExit(
+            f"{tool} failed the spec's self-check: it did not normalize\n"
+            f"    {' '.join(check['input'].split())}\n"
+            f"into output containing {check['expect']}. It is probably not the\n"
+            "right tool. Ask the user for the right one; do not fall back to\n"
+            f"searching.\nstderr: {proc.stderr.strip()[:200]}")
+
+
+def locked_cli(repo):
+    """The tree-sitter-cli version CI resolves, and where that came from."""
+    lock = os.path.join(repo, "package-lock.json")
+    if os.path.isfile(lock):
+        with open(lock, encoding="utf-8") as fh:
+            entry = json.load(fh).get("packages", {}).get(
+                "node_modules/tree-sitter-cli", {})
+        if entry.get("version"):
+            return entry["version"], "package-lock.json"
+        return None, "package-lock.json has no tree-sitter-cli entry"
+    try:
+        with open(os.path.join(repo, "package.json"), encoding="utf-8") as fh:
+            want = json.load(fh).get("devDependencies", {}).get("tree-sitter-cli")
+    except (OSError, json.JSONDecodeError):
+        want = None
+    if want:
+        return None, (f"no package-lock.json; package.json asks for `{want}`, so "
+                      "CI takes the newest release in that range")
+    return None, "no package-lock.json and no tree-sitter-cli dependency"
+
+
+def skill_digest():
+    """A hash of this skill's own files, the same for a checkout or a copy."""
+    h = hashlib.sha1()
+    for dirpath, dirnames, filenames in os.walk(SKILL_DIR):
+        dirnames[:] = sorted(d for d in dirnames
+                             if not d.startswith(".") and d != "__pycache__")
+        for name in sorted(filenames):
+            if name.startswith(".") or name.endswith(".pyc"):
+                continue
+            path = os.path.join(dirpath, name)
+            rel = os.path.relpath(path, SKILL_DIR).replace(os.sep, "/")
+            h.update(rel.encode() + b"\0")
+            with open(path, "rb") as fh:
+                h.update(fh.read())
+            h.update(b"\0")
+    return h.hexdigest()[:12]
+
+
+def skill_identity():
+    name = os.path.basename(SKILL_DIR)
+    if _run(["git", "rev-parse", "--is-inside-work-tree"], SKILL_DIR) == "true":
+        sha = _run(["git", "log", "-1", "--format=%h", "--", "."], SKILL_DIR)
+        dirty = _run(["git", "status", "--porcelain", "--", "."], SKILL_DIR)
+        where = f"@ `{sha}`" if sha else "not committed yet"
+        if dirty:
+            where += " with local changes"
+    else:
+        where = "installed copy"
+    return f"`{name}` {where}, content `{skill_digest()}`"
+
+
 # --------------------------------------------------------------------------
 # Commands
 # --------------------------------------------------------------------------
@@ -401,23 +624,81 @@ def load_spec(path):
     return spec
 
 
-def iter_trees(repo, spec, args):
-    cli = spec.get("cli", ["npx", "--no-install", "tree-sitter"])
-    patterns = args.files or spec["files"]
-    files = resolve_files(repo, patterns)
-    if not files:
-        raise SystemExit(f"no files matched: {patterns}")
+def grammar_cwd(args, repo):
     # The CLI resolves a language from the grammar repository it runs in, so it
     # is run from there even when the files under audit live somewhere else --
     # reference-normalized output, a bug report attachment, a consumer's
     # sources. Paths handed to it are absolute, so the cwd only selects the
     # grammar.
-    cwd = os.path.abspath(getattr(args, "grammar_repo", None) or repo)
+    return os.path.abspath(getattr(args, "grammar_repo", None) or repo)
+
+
+def iter_trees(repo, spec, args):
+    cli = spec.get("cli", DEFAULT_CLI)
+    patterns = args.files or spec["files"]
+    files = resolve_files(repo, patterns)
+    if not files:
+        raise SystemExit(f"no files matched: {patterns}")
+    cwd = grammar_cwd(args, repo)
     skip_re = re.compile(spec["skip_line"]) if spec.get("skip_line") else None
     batch = args.batch
     for i in range(0, len(files), batch):
         for path, tree in parse_batch(cwd, cli, files[i:i + batch]):
             yield path, tree, source_lines(path, skip_re)
+
+
+def cmd_provenance(args):
+    """Print what produced this pass's numbers, ready for the audit record.
+
+    A reference-parser line is only reusable if it holds an absolute path, and
+    one pass's numbers only compare with another's if the toolchain and the
+    method behind them are known. Typed by hand, these went missing.
+    """
+    repo = os.path.abspath(args.repo)
+    spec = load_spec(args.spec) if args.spec else {}
+    cli = spec.get("cli", DEFAULT_CLI)
+    status = 0
+
+    sha = _run(["git", "rev-parse", "--short", "HEAD"], repo)
+    if sha:
+        branch = _run(["git", "branch", "--show-current"], repo) or "(detached HEAD)"
+        dirty = _run(["git", "status", "--porcelain", "--untracked-files=no"], repo)
+        commit = f"`{branch}` @ `{sha}`" + (", with uncommitted changes" if dirty else "")
+    else:
+        commit = "not a git checkout"
+
+    found = re.search(r"\d+\.\d+\.\d+", _run(cli + ["--version"], repo) or "")
+    locked, source = locked_cli(repo)
+    if not found:
+        cli_line = (f"cannot run `{' '.join(cli)} --version` -- repair the "
+                    "toolchain before measuring anything")
+        status = 2
+    elif locked and locked != found.group(0):
+        cli_line = (f"`{found.group(0)}`, lock says `{locked}` -- MISMATCH: these "
+                    "numbers are not from the parser CI builds")
+        status = 1
+    elif locked:
+        cli_line = f"`{found.group(0)}`, lock says `{locked}`"
+    else:
+        cli_line = f"`{found.group(0)}`; {source}"
+
+    if args.tool:
+        path = resolve_tool(args.tool)
+        if path is None:
+            tool_line = f"`{args.tool}` is not executable -- confirm it with the user"
+            status = 2
+        else:
+            version = tool_version(path)
+            tool_line = f"`{path}`" + (f" ({version})" if version else "")
+    else:
+        tool_line = "not declared -- the reference comparison did not run"
+
+    print(f"- **Date:** {datetime.date.today().isoformat()}")
+    print(f"- **Branch / commit:** {commit}")
+    print(f"- **CLI version:** {cli_line}")
+    print(f"- **Reference parser:** {tool_line}")
+    print(f"- **Skill:** {skill_identity()}")
+    return status
 
 
 def cmd_probe(args):
@@ -439,30 +720,35 @@ def cmd_probe(args):
         n_files += 1
         rel = os.path.relpath(path, repo)
         for inv in selected:
-            for row, detail in CHECKS[inv["kind"]](inv, tree, lines):
-                results[inv["id"]].append((rel, row, detail))
+            for row, detail, mode in CHECKS[inv["kind"]](inv, tree, lines):
+                results[inv["id"]].append((rel, row, detail, mode))
 
     total = 0
     for inv in selected:
         hits = results[inv["id"]]
         total += len(hits)
-        status = "OK  " if not hits else "HIT "
-        print(f"{status} {inv['id']}  (layer {inv.get('layer', '?')})  "
-              f"{len(hits)} hit(s)")
-        if hits:
-            print(f"     {inv.get('why', '').strip()}")
-            by_file = {}
-            for rel, row, detail in hits:
-                by_file.setdefault(rel, []).append((row, detail))
-            for rel in sorted(by_file, key=lambda r: -len(by_file[r])):
-                rows = by_file[rel]
-                print(f"     {rel}  ({len(rows)})")
-                for row, detail in rows[:args.show]:
-                    print(f"       {row}: {detail}")
-                if len(rows) > args.show:
-                    print(f"       ... {len(rows) - args.show} more")
+        layer = inv.get("layer", "?")
+        if not hits:
+            print(f"OK   {inv['id']}  (layer {layer})  0 hit(s)")
+            continue
+        modes = {}
+        for hit in hits:
+            modes.setdefault(hit[3], []).append(hit)
+        print(f"HIT  {inv['id']}  (layer {layer})  {len(hits)} hit(s) in "
+              f"{len({h[0] for h in hits})} file(s), {len(modes)} mode(s)")
+        if not args.show:
+            continue
+        print(f"     {inv.get('why', '').strip()}")
+        ranked = sorted(modes.items(), key=lambda kv: -len(kv[1]))
+        for mode, group in ranked[:MAX_MODES]:
+            print(f"     {len(group)} hit(s) in {len({h[0] for h in group})} "
+                  f"file(s): {mode}")
+            for rel, row, detail, _mode in examples(group, args.show):
+                print(f"       {rel}:{row}: {detail}")
+        if len(ranked) > MAX_MODES:
+            print(f"     ... {len(ranked) - MAX_MODES} more mode(s)")
     print(f"\n{n_files} file(s) parsed, {total} hit(s) total.")
-    print("A hit is a candidate. Triage it against the contract document "
+    print("A hit is a candidate. Triage each mode against the contract document "
           "before touching the grammar.")
     return 1 if total else 0
 
@@ -532,7 +818,7 @@ def cmd_corpus(args):
         status = "OK  " if not hits else "HIT "
         print(f"{status} {inv['id']}  (layer {inv.get('layer', '?')})  "
               f"{len(hits)}/{n_cases} case(s), {lost} missing {inv['node']}")
-        if hits:
+        if hits and args.show:
             print(f"     {inv.get('why', '').strip()}")
             hits.sort(key=lambda h: h[3] - h[2])
             for rel, name, want, got in hits[:args.show]:
@@ -540,7 +826,7 @@ def cmd_corpus(args):
                       f"{got} in expected tree")
             if len(hits) > args.show:
                 print(f"       ... {len(hits) - args.show} more")
-    if total:
+    if total and args.show:
         print("\nAn expected tree that contradicts its own input was accepted "
               "without being read. Fix the grammar first, then regenerate and "
               "read the corpus diff -- never the other way round.")
@@ -567,72 +853,38 @@ def cmd_skeleton(args):
     generic form prints `%a, %b = ...` as `%0:2 = ...`. A spec entry's
     `weight_regex` makes the count mean the quantity.
 
+    Deliberately no discovery of the tool. Searching PATH lands on whatever is
+    there -- for MLIR, possibly LLVM's `opt`, which is a different tool
+    entirely -- and yields confident numbers whose provenance nobody checked.
+
     This only reaches inputs the reference tool accepts. Pass pipelines and
     expected-error tests are outside it, which is why the broad ERROR/MISSING
     sweep still earns its place.
     """
-    import tempfile
-
     spec = load_spec(args.spec)
     norm = spec.get("normalizer")
     if not norm:
         raise SystemExit("spec declares no normalizer; skeleton needs one")
+    counts_spec = norm.get("counts")
+    if not counts_spec:
+        raise SystemExit("the spec's normalizer declares no counts to compare")
     repo = os.path.abspath(args.repo)
-    cli = spec.get("cli", ["npx", "--no-install", "tree-sitter"])
-    command = list(norm["command"])
-    # Deliberately no discovery. Searching PATH can land on LLVM's `opt`, which
-    # is a different tool entirely, or on a build that does not register the
-    # dialects this repository needs -- and either produces confident-looking
-    # output whose provenance nobody checked. The user declares the tool; if
-    # they have not, stop and ask.
-    if not args.tool:
-        raise SystemExit(
-            "no reference parser declared.\n"
-            "Do NOT search for one: `opt` is LLVM's IR optimiser, not an MLIR\n"
-            "tool, and an arbitrary build may not register the dialects this\n"
-            "repository needs. Either way the comparison would look\n"
-            "authoritative while resting on a binary nobody chose.\n\n"
-            "Ask the user which tool to use, then pass it:\n"
-            "    --tool /path/to/mlir-opt\n"
-            "Any MLIR-based project's opt tool works (mlir-opt, circt-opt,\n"
-            "triton-opt, iree-opt ...). Version need not match the pinned\n"
-            "examples. Record the path in the audit record so the next pass\n"
-            "does not have to ask again."
-        )
-    tool = args.tool
-    if not (os.path.isfile(tool) and os.access(tool, os.X_OK)):
-        found = shutil.which(tool)
-        if found is None:
-            raise SystemExit(
-                f"declared reference parser is not executable: {tool}\n"
-                "Confirm the path with the user rather than substituting another."
-            )
-        tool = found
-    # Confirm the declared tool really is an MLIR-style opt before trusting it.
-    probe_src = "func.func @__probe__() { return }\n"
-    check = subprocess.run([tool] + command[1:] + ["-"],
-                           input=probe_src, capture_output=True, text=True)
-    if check.returncode != 0 or '"func.func"' not in check.stdout:
-        raise SystemExit(
-            f"{tool} did not round-trip a trivial MLIR function to generic "
-            "form.\n"
-            "It is probably not an MLIR opt tool -- LLVM's `opt` and a Clang\n"
-            "driver both fail here. Ask the user for the right one; do not\n"
-            "fall back to searching.\n"
-            f"stderr: {check.stderr.strip()[:200]}"
-        )
-    command[0] = tool
-    if args.verbose_tool:
-        print(f"reference parser: {tool}\n")
+    cwd = grammar_cwd(args, repo)
+    cli = spec.get("cli", DEFAULT_CLI)
+    tool = declared_tool(args.tool, norm)
+    command = [tool] + norm.get("args", [])
 
-    files = resolve_files(repo, args.files or spec["files"])
-    if args.limit:
-        files = files[:args.limit]
-    counts_spec = norm.get("counts", [{"node": "op_result", "compare": "ranked"}])
+    files = spread_sample(resolve_files(repo, args.files or spec["files"]),
+                          args.limit)
+    if not files:
+        raise SystemExit("no files matched")
 
     rejected, compared = 0, 0
     measured = [[] for _ in counts_spec]  # per entry: (rel, grammar, reference)
     with tempfile.TemporaryDirectory() as tmp:
+        run_self_check(tool, norm, spec, tmp)
+        version = tool_version(tool)
+        print(f"reference parser: {tool}" + (f"  ({version})" if version else ""))
         for i in range(0, len(files), args.batch):
             batch = files[i:i + args.batch]
             pairs = []
@@ -648,8 +900,8 @@ def cmd_skeleton(args):
                 pairs.append((src, dst))
             if not pairs:
                 continue
-            orig = dict(parse_batch(repo, cli, [p[0] for p in pairs]))
-            gen = dict(parse_batch(repo, cli, [p[1] for p in pairs]))
+            orig = dict(parse_batch(cwd, cli, [p[0] for p in pairs]))
+            gen = dict(parse_batch(cwd, cli, [p[1] for p in pairs]))
             for src, dst in pairs:
                 compared += 1
                 lo, lg = read_bytes_lines(src), read_bytes_lines(dst)
@@ -669,13 +921,14 @@ def cmd_skeleton(args):
             "evidence line produced no result at all. Usual causes: the file\n"
             "selection is too narrow (a --limit that lands only on pass\n"
             "pipelines or expected-error tests), or the tool is from a release\n"
-            "whose dialect syntax has moved. Widen the selection, or say in the\n"
-            "report that the reference comparison did not run."
+            "whose syntax has moved. Widen the selection, or say in the report\n"
+            "that the reference comparison did not run."
         )
         return 2
     if rejected:
-        print("  (pass pipelines, expected-error tests and syntax from another "
-              "release are outside this check by nature, not a parser signal)")
+        print("  (inputs the tool declines -- pass pipelines, expected-error "
+              "tests, syntax from another release -- are a coverage limit, "
+              "not a parser signal)")
     print()
     differs = False
     for entry, rows in zip(counts_spec, measured):
@@ -707,10 +960,14 @@ def report_counts(entry, rows, compared, show):
     status = "HIT " if flagged else "OK  "
     if mode == "ranked":
         print(f"{status} {label}: {len(flagged)} of {compared} file(s) differ "
-              f"from the reference parser")
+              f"from the reference parser, {len(over)} above it and "
+              f"{len(under)} below")
     else:
         print(f"{status} {label}: {len(over)} of {compared} file(s) above the "
-              f"reference; {len(under)} below it, as expected ({entry.get('why', '').strip()})")
+              f"reference; {len(under)} below it, as expected "
+              f"({entry.get('why', '').strip()})")
+    if not show:
+        return bool(flagged)
     if mode == "ranked" and entry.get("why") and flagged:
         print(f"     {entry['why'].strip()}")
     if over:
@@ -736,14 +993,13 @@ def report_counts(entry, rows, compared, show):
 def cmd_census(args):
     spec = load_spec(args.spec)
     repo = os.path.abspath(args.repo)
-    census = {}
+    census, shapes = {}, {}
     for path, tree, _lines in iter_trees(repo, spec, args):
         rel = os.path.relpath(path, repo)
-        counts = {}
-        for n in tree.walk():
-            counts[n.type] = counts.get(n.type, 0) + 1
-        census[rel] = counts
-    payload = {"language": spec["language"], "files": census}
+        census[rel], shapes[rel] = census_entry(tree)
+    # The shapes are digests for one before/after comparison, written to a
+    # scratch path -- not a baseline, and never kept in the repository.
+    payload = {"language": spec["language"], "files": census, "shapes": shapes}
     with open(args.out, "w", encoding="utf-8") as fh:
         json.dump(payload, fh, indent=1, sort_keys=True)
     total = {}
@@ -757,9 +1013,11 @@ def cmd_census(args):
 
 def cmd_diff(args):
     with open(args.before, encoding="utf-8") as fh:
-        before = json.load(fh)["files"]
+        b_payload = json.load(fh)
     with open(args.after, encoding="utf-8") as fh:
-        after = json.load(fh)["files"]
+        a_payload = json.load(fh)
+    before, after = b_payload["files"], a_payload["files"]
+    b_shapes, a_shapes = b_payload.get("shapes", {}), a_payload.get("shapes", {})
 
     common = set(before) & set(after)
 
@@ -781,11 +1039,15 @@ def cmd_diff(args):
     removed = sorted(set(before) - set(after))
     # Only a file present in BOTH censuses can show a parser behaviour change.
     # After an upstream sync the added list is expected and carries no signal.
-    changed = sorted(f for f in common if before[f] != after[f])
+    recounted = sorted(f for f in common if before[f] != after[f])
+    # Equal counts do not mean an equal tree: a body that swallows one more
+    # line, or a node that moves to another parent, keeps every count.
+    reshaped = sorted(f for f in common
+                      if before[f] == after[f] and f in b_shapes and f in a_shapes
+                      and b_shapes[f] != a_shapes[f])
 
-    if not changed_types and not changed and not added and not removed:
-        print("no node-census change: the grammar change is inert on this "
-              "file set.")
+    if not (changed_types or recounted or reshaped or added or removed):
+        print("no change: the grammar change is inert on this file set.")
         return 0
 
     if changed_types:
@@ -793,21 +1055,31 @@ def cmd_diff(args):
         for k, b, a in changed_types:
             print(f"  {k:40s} {b:7d} -> {a:7d}  ({a - b:+d})")
 
-    print(f"\nfiles present in both, parsing differently: {len(changed)}")
-    for f in changed[:args.show]:
-        print(f"  {f}")
-    if len(changed) > args.show:
-        print(f"  ... {len(changed) - args.show} more")
+    def listing(title, names):
+        print(f"  {title}: {len(names)}")
+        for f in names[:args.show]:
+            print(f"    {f}")
+        if args.show and len(names) > args.show:
+            print(f"    ... {len(names) - args.show} more")
+
+    print(f"\nfiles present in both, parsing differently: "
+          f"{len(recounted) + len(reshaped)}")
+    listing("node counts changed", recounted)
+    listing("same counts, different shape (a span, parent or field moved)",
+            reshaped)
+    if not (b_shapes and a_shapes):
+        print("  (a census without shapes predates them; only count changes "
+              "are visible for it)")
 
     if added or removed:
         print(f"\nfile set also moved: +{len(added)} added, "
               f"-{len(removed)} removed (expected after an input sync; "
               f"no parser signal)")
 
-    print("\nOnly the 'parsing differently' list is a blast radius. A fix "
+    print("\nOnly the 'parsing differently' files are a blast radius. A fix "
           "aimed at one construct that moves unrelated files needs an "
           "explanation; after a sync, this list should normally be empty.")
-    return 1 if (changed_types or changed) else 0
+    return 1 if (changed_types or recounted or reshaped) else 0
 
 
 def main(argv=None):
@@ -825,31 +1097,40 @@ def main(argv=None):
                             "--repo holds files from somewhere else (normalized "
                             "output, an attached reproducer). Defaults to --repo.")
 
-    p = sub.add_parser("probe", help="check structural invariants")
-    common(p)
-    p.add_argument("--id", action="append", default=[],
-                   help="only run this invariant (repeatable)")
-    p.add_argument("--show", type=int, default=5,
-                   help="hits to print per file (default 5)")
-    p.set_defaults(func=cmd_probe)
-
-    p = sub.add_parser("corpus", help="check the corpus against its own inputs")
+    p = sub.add_parser("provenance",
+                       help="print the toolchain, commit and skill version for "
+                            "the audit record")
     p.add_argument("--repo", required=True, help="grammar repository root")
-    p.add_argument("--spec", required=True, help="invariant spec JSON")
-    p.add_argument("--id", action="append", default=[])
-    p.add_argument("--show", type=int, default=10)
-    p.set_defaults(func=cmd_corpus)
+    p.add_argument("--spec", help="invariant spec JSON, for its CLI command")
+    p.add_argument("--tool", help="the declared reference parser, to record")
+    p.set_defaults(func=cmd_provenance)
 
     p = sub.add_parser(
         "skeleton",
         help="compare the grammar against the language's reference parser")
     common(p)
-    p.add_argument("--tool", help="path to the reference parser to use")
-    p.add_argument("--verbose-tool", action="store_true",
-                   help="print which reference parser was resolved")
-    p.add_argument("--limit", type=int, help="only the first N files")
-    p.add_argument("--show", type=int, default=10)
+    p.add_argument("--tool", help="the reference parser the user declared")
+    p.add_argument("--limit", type=int,
+                   help="compare N files spread evenly across the set")
+    p.add_argument("--show", type=int, default=10,
+                   help="files to list per direction; 0 for summary lines only")
     p.set_defaults(func=cmd_skeleton)
+
+    p = sub.add_parser("corpus", help="check the corpus against its own inputs")
+    p.add_argument("--repo", required=True, help="grammar repository root")
+    p.add_argument("--spec", required=True, help="invariant spec JSON")
+    p.add_argument("--id", action="append", default=[])
+    p.add_argument("--show", type=int, default=10,
+                   help="cases to list; 0 for summary lines only")
+    p.set_defaults(func=cmd_corpus)
+
+    p = sub.add_parser("probe", help="check structural invariants")
+    common(p)
+    p.add_argument("--id", action="append", default=[],
+                   help="only run this invariant (repeatable)")
+    p.add_argument("--show", type=int, default=5,
+                   help="examples per mode; 0 for summary lines only")
+    p.set_defaults(func=cmd_probe)
 
     p = sub.add_parser("census", help="record a node census")
     common(p)
@@ -859,7 +1140,8 @@ def main(argv=None):
     p = sub.add_parser("diff", help="diff two censuses")
     p.add_argument("before")
     p.add_argument("after")
-    p.add_argument("--show", type=int, default=20)
+    p.add_argument("--show", type=int, default=20,
+                   help="files to list per kind of change; 0 for counts only")
     p.set_defaults(func=cmd_diff)
 
     args = ap.parse_args(argv)
