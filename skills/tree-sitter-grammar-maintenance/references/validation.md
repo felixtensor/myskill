@@ -146,6 +146,7 @@ python3 scripts/test_probe.py
 | 优先直接调用仓库的 `node_modules/.bin/tree-sitter`，找不到才退回 npx；spec 指定的 `cli` 优先 | 每批解析都多花 0.3 秒启动 npm |
 | 工具输出按 UTF-8 解码；skill 摘要不受 CRLF 检出影响 | Windows 上带非 ASCII 字符串属性的文件解码出错；同一个提交在两个平台上摘要不同 |
 | 两次 skeleton 运行的 `diff` 标出变远、新高于 reference 和 reference 一侧变动的文件；census 与 skeleton 的结果不能互相 `diff` | 修复是否真的让文件更接近 reference，只能靠肉眼比较总数；generic 路径被改动也没人发现 |
+| `probe`、`census` 走完整命令：有命中时退出码为 1、命中归在正确的不变量和 mode 下、`--show 0` 只留汇总行；census 输出带 `kind` 和 `shapes`，能直接 `diff` | 这四处植入的 bug，之前的测试一个都没发现：有命中却报干净、命中归错不变量、漏掉第一个文件之后的命中、census 悄悄退化成只比计数 |
 | census 在计数相同、形状不同时仍然报告 | span 或父节点变了的改动被报告成 inert |
 | `--limit` 均匀抽样；声明的工具必须通过 spec 的自检；没声明时拒绝运行；一个文件都没比较时以 2 退出 | 只抽到少数几个目录；在一个没人选过的二进制上得出看似权威的数字；什么都没比较却报告通过 |
 | `provenance` 标出 CLI 与锁文件不一致，没有锁文件时说明版本范围 | 在 CI 不会构建的 parser 上测量 |

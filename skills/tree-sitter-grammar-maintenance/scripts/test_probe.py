@@ -331,6 +331,20 @@ for path in sys.argv[2:]:
 """
 
 
+def blocks(text):
+    """`probe` output per invariant: {id: its summary line and what follows}."""
+    found, current = {}, None
+    for line in text.splitlines():
+        m = re.match(r"(?:OK|HIT)\s+(\S+)", line)
+        if m:
+            current = found.setdefault(m.group(1), [line])
+        elif current is not None and line.startswith(" "):
+            current.append(line)
+        else:
+            current = None
+    return {key: "\n".join(lines) for key, lines in found.items()}
+
+
 def write(path, text, executable=False):
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(text)
@@ -590,6 +604,70 @@ result group
         self.assertEqual(status, 1)
         self.assertIn("1/2 case(s): 1 short by 1 op_result, 0 over", text)
         self.assertIn("'masked loss'  3 in input, 2 in expected tree", text)
+
+
+class Commands(unittest.TestCase):
+    """`probe` and `census` through the command line, on captured CLI output.
+
+    Each piece they are built from is tested above, yet a probe that exited 0
+    with hits, filed hits under the wrong invariant, or dropped every file
+    after the first, and a census that stopped writing shapes, all passed.
+    """
+
+    def repo(self, tmp, sources, cli):
+        os.makedirs(os.path.join(tmp, "examples"))
+        for name, text in sources.items():
+            write(os.path.join(tmp, "examples", name), text)
+        return write(os.path.join(tmp, "spec.json"), json.dumps(dict(SPEC, cli=[cli])))
+
+    def canned_cli(self, tmp, trees):
+        """A CLI that prints the captured tree for each file, by file name."""
+        return python_tool(tmp, "canned-tree-sitter", (
+            "import json, os, sys\n"
+            f"trees = json.loads({json.dumps(json.dumps(trees))})\n"
+            "for path in sys.argv[2:]:\n"
+            "    print(trees[os.path.basename(path)])\n"))
+
+    def test_probe_files_each_hit_under_its_invariant(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = self.canned_cli(tmp, {"good.mlir": GOOD_TREE, "lost.mlir": LOST_TREE})
+            spec = self.repo(tmp, {"good.mlir": GOOD_SRC, "lost.mlir": LOST_SRC}, cli)
+            status, text = call(["probe", "--repo", tmp, "--spec", spec])
+            quiet_status, quiet = call(["probe", "--repo", tmp, "--spec", spec,
+                                        "--show", "0"])
+            clean_status, _ = call(["probe", "--repo", tmp, "--spec", spec,
+                                    "--files", "examples/good.mlir"])
+        self.assertEqual((status, quiet_status, clean_status), (1, 1, 0))
+        found = blocks(text)
+        self.assertIn("1 hit(s) in 1 file(s), 1 mode(s)", found["op-result-binding"])
+        self.assertIn("value_use in custom_operation", found["op-result-binding"])
+        self.assertIn(os.path.join("examples", "lost.mlir") + ":2: %res = arith.addi",
+                      found["op-result-binding"])
+        self.assertIn("custom_operation without a region", found["custom-body-boundary"])
+        for clean in ("no-error-node", "block-label", "custom-body-generic-op"):
+            self.assertTrue(found[clean].startswith("OK"), clean)
+        # --show 0 leaves one summary line per invariant and nothing under it.
+        self.assertEqual(len(blocks(quiet)), len(SPEC["invariants"]))
+        self.assertEqual([line for line in quiet.splitlines() if line.startswith(" ")], [])
+
+    def test_a_census_feeds_diff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = python_tool(tmp, "fake-tree-sitter", FAKE_CLI)
+            spec = self.repo(tmp, {"a.mlir": "%x = y\n", "b.mlir": "%x = y\n"}, cli)
+            before = os.path.join(tmp, "before.json")
+            after = os.path.join(tmp, "after.json")
+            self.assertEqual(call(["census", "--repo", tmp, "--spec", spec,
+                                   "--out", before])[0], 0)
+            write(os.path.join(tmp, "examples", "b.mlir"), "%x = y\n%z = w\n")
+            call(["census", "--repo", tmp, "--spec", spec, "--out", after])
+            with open(before, encoding="utf-8") as fh:
+                payload = json.load(fh)
+            status, text = call(["diff", before, after])
+        self.assertEqual(payload["kind"], "census")
+        self.assertEqual(sorted(payload["shapes"]), sorted(payload["files"]))
+        self.assertEqual(status, 1)
+        self.assertIn("node counts changed: 1", text)
+        self.assertIn(os.path.join("examples", "b.mlir"), text)
 
 
 class SkeletonRuns(unittest.TestCase):
