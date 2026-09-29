@@ -16,6 +16,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import types
@@ -27,6 +28,11 @@ sys.path.insert(0, HERE)
 import probe  # noqa: E402
 
 SPEC = probe.load_spec(os.path.join(HERE, "..", "assets", "invariants", "mlir.json"))
+
+# parse_command builds parsers into a cache; keep the fake ones out of the
+# real one.
+_PARSER_CACHE = tempfile.TemporaryDirectory()
+os.environ["PROBE_PARSER_CACHE"] = _PARSER_CACHE.name
 INVARIANTS = {inv["id"]: inv for inv in SPEC["invariants"]}
 SKIP = re.compile(SPEC["skip_line"])
 
@@ -317,11 +323,26 @@ def python_tool(directory, name, source):
                  f'@"{sys.executable}" "{script}" %*\n')
 
 
+# The part of a fake tree-sitter CLI that answers `build -o LIB` with an
+# empty library and leaves `files` holding the paths a `parse` was given.
+FAKE_CLI_ARGS = """\
+import sys
+args = sys.argv[1:]
+if args[0] == "build":
+    open(args[args.index("-o") + 1], "w").close()
+    sys.exit(0)
+files, rest = [], iter(args[1:])
+for a in rest:
+    if a in ("--lib-path", "--lang-name"):
+        next(rest)
+    else:
+        files.append(a)
+"""
+
 # Stands in for the tree-sitter CLI: one tree per file, one operation with an
 # op_result for each line that starts with `%`.
-FAKE_CLI = """\
-import sys
-for path in sys.argv[2:]:
+FAKE_CLI = FAKE_CLI_ARGS + """\
+for path in files:
     n = sum(1 for line in open(path) if line.startswith("%"))
     out = [f"(toplevel [0, 0] - [{n}, 0]"]
     for i in range(n):
@@ -594,6 +615,25 @@ result group
         src, tree = self.case(self.GROUP)
         self.assertEqual(probe.corpus_balance(self.INV, src, tree), (1, 1))
 
+    def test_a_cst_case_is_counted_in_its_own_format(self):
+        # A `:cst` case records `parse --cst` lines, not an S-expression;
+        # counted as one, its binding read as lost.
+        src = "%z = test.make %a : i32\n"
+        tree = ("\n0:0  - 1:0   toplevel\n0:0  - 0:23    operation\n"
+                "0:0  - 0:2       lhs: op_result\n0:0  - 0:2         value_use\n"
+                "0:0  - 0:1           \"%\"\n")
+        self.assertEqual(probe.corpus_balance(self.INV, src, tree), (1, 1))
+
+    def test_a_wrapped_affine_bound_is_not_a_binding(self):
+        # `%i = max ...` continues `affine.for` on the line above; the case
+        # that pins it in tree-sitter-mlir read as a lost binding.
+        line = re.compile(self.INV["line"])
+        for bound in ("      %i = max affine_map<()[s0] -> (s0)>()[%n] to 10 {",
+                      "  %i = 0 to 10 {", "  %j = min #map(%i)"):
+            self.assertIsNone(line.match(bound), bound)
+        for binding in ("  %m = minimum.op %a", '%x = "t.op"() : () -> i32'):
+            self.assertIsNotNone(line.match(binding), binding)
+
     def test_the_corpus_command_reports_the_loss(self):
         with tempfile.TemporaryDirectory() as tmp:
             os.makedirs(os.path.join(tmp, "test", "corpus"))
@@ -622,10 +662,10 @@ class Commands(unittest.TestCase):
 
     def canned_cli(self, tmp, trees):
         """A CLI that prints the captured tree for each file, by file name."""
-        return python_tool(tmp, "canned-tree-sitter", (
-            "import json, os, sys\n"
+        return python_tool(tmp, "canned-tree-sitter", FAKE_CLI_ARGS + (
+            "import json, os\n"
             f"trees = json.loads({json.dumps(json.dumps(trees))})\n"
-            "for path in sys.argv[2:]:\n"
+            "for path in files:\n"
             "    print(trees[os.path.basename(path)])\n"))
 
     def test_probe_files_each_hit_under_its_invariant(self):
@@ -784,7 +824,7 @@ class Speed(unittest.TestCase):
 
     def test_parallel_parsing_gives_the_sequential_answer_in_order(self):
         with tempfile.TemporaryDirectory() as tmp:
-            cli = [python_tool(tmp, "fake-tree-sitter", FAKE_CLI)]
+            cli = [python_tool(tmp, "fake-tree-sitter", FAKE_CLI), "parse"]
             files = [write(os.path.join(tmp, f"f{i}.mlir"), "%x = y\n" * i)
                      for i in range(1, 6)]
             args = types.SimpleNamespace(batch=2, jobs=1)
@@ -804,6 +844,37 @@ class Speed(unittest.TestCase):
             local = python_tool(bin_dir, "tree-sitter", "print('tree-sitter 0.27.0')\n")
             [found] = probe.resolve_cli({}, repo)
             self.assertEqual(os.path.normcase(found), os.path.normcase(local))
+
+    def test_each_checkout_parses_with_the_parser_built_from_its_own_src(self):
+        # `tree-sitter parse` in a worktree picked the main checkout's grammar
+        # from the CLI config, so a before/after measured one parser twice.
+        with tempfile.TemporaryDirectory() as tmp:
+            log = os.path.join(tmp, "log")
+            cli = python_tool(tmp, "fake-tree-sitter", (
+                "import json, os, sys\n"
+                f"open({log!r}, 'a').write(json.dumps([os.getcwd()] + sys.argv[1:]) + '\\n')\n"
+                ) + FAKE_CLI_ARGS)
+            spec = {"language": "mlir", "cli": [cli]}
+            main, worktree = os.path.join(tmp, "main"), os.path.join(tmp, "wt")
+            for repo, source in ((main, "old"), (worktree, "new")):
+                os.makedirs(os.path.join(repo, "src"))
+                write(os.path.join(repo, "src", "parser.c"), source)
+            cmd_main = probe.parse_command(spec, main)
+            cmd_wt = probe.parse_command(spec, worktree)
+            again = probe.parse_command(spec, worktree)
+            with open(log) as fh:
+                builds = [call for call in map(json.loads, fh) if call[1] == "build"]
+            # Compared as files: Windows may spell one temp directory two ways.
+            built_in_worktree = os.path.samefile(builds[1][0], worktree)
+        lib_main = cmd_main[cmd_main.index("--lib-path") + 1]
+        lib_wt = cmd_wt[cmd_wt.index("--lib-path") + 1]
+        self.assertNotEqual(lib_main, lib_wt)
+        self.assertEqual(cmd_wt, again)
+        # Built once per checkout content, each in its own checkout.
+        self.assertEqual(len(builds), 2)
+        self.assertTrue(built_in_worktree)
+        self.assertEqual(builds[1][2], "-o")
+        self.assertEqual(cmd_wt[-4:], ["--lib-path", lib_wt, "--lang-name", "mlir"])
 
     def test_npx_is_the_fallback_and_a_spec_cli_wins(self):
         with tempfile.TemporaryDirectory() as repo:
@@ -870,6 +941,137 @@ class Provenance(unittest.TestCase):
               json.dumps({"devDependencies": {"tree-sitter-cli": "^0.26.11"}}))
         self.assertIsNone(probe.locked_cli(self.repo)[0])
         self.assertIn("^0.26.11", probe.locked_cli(self.repo)[1])
+
+    def pin(self, version):
+        os.makedirs(os.path.join(self.repo, ".github", "workflows"), exist_ok=True)
+        write(os.path.join(self.repo, ".github", "workflows", "ci.yml"),
+              "jobs:\n  test:\n    steps:\n      - uses: tree-sitter/setup-action/cli@v2\n"
+              f"        with:\n          tree-sitter-ref: v{version}\n")
+
+    def test_a_ci_pin_drifted_from_the_lock_is_flagged(self):
+        # CI installed 0.26.12 under a 0.27.0 lock, and its fuzzer failed a
+        # correct `:cst` case -- local runs could not show it.
+        self.pin("0.26.12")
+        status, text = call(["provenance", "--repo", self.repo,
+                             "--spec", self.spec_with_cli("0.27.0")])
+        self.assertEqual(status, 1)
+        self.assertIn("- **CLI in CI:** MISMATCH: `0.26.12` in "
+                      + os.path.join(".github", "workflows", "ci.yml") + ":6", text)
+
+    def test_a_literal_pin_matching_the_lock_is_recorded_as_hand_synced(self):
+        self.pin("0.27.0")
+        status, text = call(["provenance", "--repo", self.repo,
+                             "--spec", self.spec_with_cli("0.27.0")])
+        self.assertEqual(status, 0)
+        self.assertIn("- **CLI in CI:** `0.27.0` in 1 literal pin(s) -- synced by hand",
+                      text)
+
+    def test_a_version_computed_in_a_composite_action_is_found(self):
+        # The cure for the drift: an action under .github/actions reads the
+        # lock and passes an expression, not a literal.
+        action = os.path.join(self.repo, ".github", "actions", "setup")
+        os.makedirs(action)
+        write(os.path.join(action, "action.yml"),
+              "runs:\n  steps:\n    - uses: tree-sitter/setup-action/cli@v2\n"
+              "      with:\n        tree-sitter-ref: ${{ steps.cli.outputs.ref }}\n")
+        status, text = call(["provenance", "--repo", self.repo,
+                             "--spec", self.spec_with_cli("0.27.0")])
+        self.assertEqual(status, 0)
+        self.assertIn("computed at run time (`${{ steps.cli.outputs.ref }}` in "
+                      + os.path.join(".github", "actions", "setup", "action.yml")
+                      + ":5)", text)
+
+
+class CensusGroups(unittest.TestCase):
+    def test_files_that_moved_the_same_way_are_one_group(self):
+        before = {"a": {"op_result": 1}, "b": {"op_result": 2},
+                  "c": {"op_result": 1, "region": 2}}
+        after = {"a": {"op_result": 3}, "b": {"op_result": 4},
+                 "c": {"op_result": 2, "region": 1}}
+        with tempfile.TemporaryDirectory() as tmp:
+            paths = [write(os.path.join(tmp, n + ".json"), json.dumps(
+                {"kind": "census", "language": "x", "files": files, "shapes": {}}))
+                for n, files in (("before", before), ("after", after))]
+            status, text = call(["diff"] + paths)
+        self.assertEqual(status, 1)
+        self.assertIn("node counts changed: 3, in 2 group(s) by the types that moved", text)
+        self.assertIn("2 file(s): op_result +4", text)
+        # The odd one out keeps its own line instead of hiding in a file list.
+        self.assertIn("1 file(s): op_result +1, region -1", text)
+
+
+class CorpusBefore(unittest.TestCase):
+    """`corpus --before REV` on a regenerated corpus."""
+
+    BEFORE = """\
+================================================================================
+two bindings
+================================================================================
+
+%a = t.one
+%b = t.two
+
+--------------------------------------------------------------------------------
+
+(toplevel
+  (operation
+    lhs: (op_result
+      (value_use))
+    rhs: (custom_operation
+      name: (custom_op_name)
+      (value_use)))
+  (operation
+    rhs: (custom_operation
+      name: (custom_op_name))))
+"""
+    # The fix moves the trailing value_use into the next operation's op_result:
+    # its preorder position changes, its place among the leaves does not.
+    REGROUPED = BEFORE.replace("""\
+      name: (custom_op_name)
+      (value_use)))
+  (operation
+    rhs:""", """\
+      name: (custom_op_name)))
+  (operation
+    lhs: (op_result
+      (value_use))
+    rhs:""")
+
+    def run_git(self, repo, *argv):
+        subprocess.run(["git", "-C", repo, "-c", "user.name=t", "-c",
+                        "user.email=t@example.com"] + list(argv),
+                       check=True, capture_output=True)
+
+    def diff(self, after):
+        spec = os.path.join(HERE, "..", "assets", "invariants", "mlir.json")
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(os.path.join(tmp, "test", "corpus"))
+            corpus = os.path.join(tmp, "test", "corpus", "cases.txt")
+            write(corpus, self.BEFORE)
+            self.run_git(tmp, "init", "-q")
+            self.run_git(tmp, "add", ".")
+            self.run_git(tmp, "commit", "-q", "-m", "corpus")
+            write(corpus, after)
+            return call(["corpus", "--repo", tmp, "--spec", spec,
+                         "--before", "HEAD"])
+
+    def test_a_regrouping_is_sorted_by_the_types_that_moved(self):
+        status, text = self.diff(self.REGROUPED)
+        self.assertEqual(status, 0)
+        self.assertIn("1 case(s) changed, 0 new, 0 removed", text)
+        self.assertIn("1 case(s): op_result +1", text)
+        self.assertNotIn("!!", text)
+
+    def test_a_moved_leaf_is_read_first(self):
+        moved = self.BEFORE.replace("      (value_use)))", "      (bare_id)))")
+        status, text = self.diff(moved)
+        self.assertEqual(status, 1)
+        self.assertIn("'two bindings' -- leaves moved, appeared or vanished", text)
+
+    def test_a_changed_input_is_not_a_regeneration(self):
+        status, text = self.diff(self.REGROUPED.replace("%b = t.two", "%b = t.too"))
+        self.assertEqual(status, 1)
+        self.assertIn("'two bindings' -- input changed", text)
 
 
 if __name__ == "__main__":

@@ -107,7 +107,8 @@ authoritative while resting on nothing. Take, in order, the path the user gave i
 this session; the absolute path in the audit record; otherwise ask — with the
 client's question mechanism where there is one — and wait. The spec's `tool_hint`
 says what kind of tool serves, and `probe.py` refuses one that fails the spec's
-self-check, so a wrong answer fails loudly. **If the user has none**, run the other
+self-check, so a wrong answer fails loudly. When the user's tool fails it and the
+record names another, ask before switching. **If the user has none**, run the other
 checks and **say in the report that the reference comparison did not run and
 coverage is reduced** — a fine outcome, as long as it is not presented as complete.
 
@@ -121,11 +122,12 @@ TOOL=/path/declared/by/the/user         # leave --tool off if there is none
 python3 scripts/probe.py provenance --repo "$REPO" --spec "$SPEC" --tool "$TOOL"
 ```
 
-It prints the audit record's provenance lines — commit, CLI against the lock file,
-the reference parser's absolute path and version, the skill version — and exits 1
-when the CLI is not the one the lock pins: numbers from a parser CI would not build
-are worthless, and this check has caught a real drift. Without a lock file, CI takes
-the newest CLI in the declared range, so name the version you measured with.
+It prints the audit record's provenance lines — commit, the CLI against the lock
+file and against what the CI workflows pin, the reference parser's absolute path and
+version, the skill version — and exits 1 when either CLI differs from the lock:
+numbers from a parser CI would not build are worthless, and each check has caught a
+real drift. Without a lock file, CI takes the newest CLI in the declared range, so
+name the version you measured with.
 
 On a mismatch, **ask before repairing** with `npm ci`, and rerun `provenance` after:
 npm may block the `tree-sitter-cli` install script and leave a package with no binary
@@ -210,9 +212,8 @@ the whole reason the parser was written instead of hard-coding the ecosystem.
 
 `scripts/probe.py` is standard-library Python and writes nothing into the parser
 repository. Run it from the skill directory with `REPO`, `SPEC` and `TOOL` set as in
-Part 0. Every command that prints detail takes `--show N` to widen it, and
-`--show 0` for summary lines only; the ones that parse use every core, and
-`--jobs N` limits them.
+Part 0. `--show N` widens what a command prints and `--show 0` leaves summary lines;
+the commands that parse use every core, and `--jobs N` limits them.
 
 **Compare against the reference parser first, where one exists:**
 
@@ -234,12 +235,10 @@ gate**:
   quantity, and the top of the list is where to look. On a `ceiling` quantity the
   reference is expected to count more, for the reason the spec states — which is
   also where a swallowed operation hides, so leave those to the invariants.
-- **small gaps** — often a legitimate printing difference rather than a defect. The
-  language layer documents which ones, and why a green number here would be
-  meaningless.
+- **small gaps** — often a legitimate printing difference; the language layer
+  documents which, and why a green number here would be meaningless.
 
-Files the tool declines — pass pipelines, expected-error tests, syntax from another
-compiler revision — are a coverage limit, not a parser signal: say how many were
+Files the tool declines are a coverage limit, not a parser signal: say how many were
 skipped. A run that compared nothing exits 2; never report it as clean.
 
 **Corpus self-consistency — needs no parser at all:**
@@ -260,31 +259,24 @@ python3 scripts/probe.py probe --repo "$REPO" --spec "$SPEC" --id op-result-bind
 ```
 
 Hits are grouped by **mode** — what a hit looks like structurally, such as
-`value_use in custom_operation` for a binding a body swallowed — with examples drawn
-from different files. Ten thousand hits in one mode are one finding: triage modes,
-not files. Three invariant kinds are available, and each maps onto a contract
-statement:
+`value_use in custom_operation` for a binding a body swallowed. Ten thousand hits in
+one mode are one finding: triage modes, not files. Each invariant kind mechanizes a
+contract statement:
 
 - `line_produces` — a source line of a given shape must start a node of a given
-  type. This is how a lost or re-attributed binding is detected.
-- `no_node` — ERROR / MISSING must not appear, with locations. A MISSING token is
-  usually anonymous and absent from the printed tree; the probe takes it from the
-  CLI's per-file error line instead, which names only a file's *first* error — fix
-  it and rerun before concluding the file has no other.
-- `span_guard` — a node must not extend across a line that unambiguously starts the
-  next sibling construct. This is boundary preservation in machine-checkable form.
-  With `check_after_last`, a node holding a region is checked after the region
-  closes; exempting such nodes outright hid bodies that ran on past their region.
+  type; a lost or re-attributed binding fails it.
+- `no_node` — no ERROR or MISSING. A MISSING token is anonymous, so it comes from
+  the CLI's error line, which names only a file's *first* error: fix it and rerun.
+- `span_guard` — a node must not cross a line that unambiguously starts the next
+  sibling; with `check_after_last`, also after the node's own region closes.
 
 Keep invariants few, narrow and high-precision. An invariant that fires on ordinary
 correct code is worse than no invariant, because it trains you to skim the output.
 
-**Strip comments before any text-level scan**, whether of sources or of query
-files. Prose mentioning `@function` or a `%x` is not a capture or a binding, and a
-scan that counts it will hand you a confident list of findings that are entirely
-punctuation. The spec's `skip_line` does this for source files; a one-off check you
-write inline has to do it itself. When a check reports several odd-looking hits at
-once, suspect the check before the parser.
+**Strip comments before any text-level scan**, of sources or of query files: prose
+mentioning `@function` or `%x` is not a capture or a binding. The spec's `skip_line`
+does it for source files; a one-off check has to do it itself. When a check reports
+several odd-looking hits at once, suspect the check before the parser.
 
 **Blast radius, around any grammar change:**
 
@@ -297,10 +289,17 @@ python3 scripts/probe.py diff "$T/before.json" "$T/after.json"
 ```
 
 Run this on every grammar change without exception. `diff` lists the files that now
-parse differently: node counts changed, or same counts with a different shape — a
-span, parent or field that moved, which counts alone never show. A fix aimed at one
-construct that moves unrelated files needs an explanation before review; this is the
-cheapest guard against a dialect-specific fix quietly damaging the general path.
+parse differently: node counts changed — grouped by the types that moved, so one odd
+file cannot hide among four hundred expected ones — or same counts with a different
+shape, a span, parent or field that moved. Every group needs an explanation before
+review, and every kind of real input the change moved owes a corpus case. This is
+the cheapest guard against a dialect-specific fix quietly damaging the general path.
+
+**Parse with this checkout's parser.** `tree-sitter parse` picks a grammar by file
+extension among all it knows, other checkouts in its config included: in a worktree
+it parsed with the main checkout's grammar despite `--grammar-path` and its own
+`TREE_SITTER_LIBDIR`. `probe.py` builds and loads the checkout's own; by hand, run
+`tree-sitter build -o LIB`, then `parse --lib-path LIB --lang-name NAME`.
 
 A census is a scratch measurement for one change. Write it to a temporary path,
 never into the repository — a committed baseline is the persistent snapshot the
@@ -336,31 +335,40 @@ layer names the surface and the boundaries for its language, and works two examp
 end to end, one must-fix and one accepted. Record every verdict in the audit record,
 including the ones you decide *not* to act on.
 
-**A pass that finds nothing is a finished pass.** Do not reach for a small
-completable change to show progress — a fix made to have made a fix costs a review,
-adds churn, and spends the credibility the next real finding will need. Every change
-needs a reason that stands on its own: a reader misled, a consumer broken, a claim
-that is false.
+**A pass that finds nothing is a finished pass.** Do not reach for a small change
+to show progress: every change needs a reason that stands on its own — a reader
+misled, a consumer broken, a claim that is false.
 
 ---
 
 # Part 5 · From finding to patch
 
-**Take one topic at a time.** One grammar or scanner theme per change, and if it
-does not resolve within a couple of working sessions, split it rather than growing
-it. An audit that turns into a rewrite has stopped being an audit, and a large
-change forfeits the one review mechanism this project relies on: a corpus diff a
-person can actually read.
+**Take one topic at a time.** One grammar or scanner theme per change; if it does
+not resolve within a couple of working sessions, split it rather than growing it. A
+large change forfeits the one review mechanism this project relies on: a corpus diff
+a person can actually read.
 
 **Write the minimal reproducer first, and write it as a corpus case.** Shrink the
 real input until one construct remains. Write the expected tree *by hand*, from the
 contract. Confirm it fails. Only then open the grammar. Never do this in the other
 order: generating the tree first and reading it second is precisely how the defect
-got into the corpus to begin with.
+got into the corpus to begin with. Write the false-positive guards at the same time:
+inputs that look like the defect and parse correctly today. The direct hits must
+fail before the change and the guards must pass before it; a guard checked only
+against the fixed parser pins nothing.
 
 **`tree-sitter test --update` output is a draft, never a result.** Read every line
 of the diff it produces. If the diff is too large to read, the change is too large
-to land. A hunk you do not understand is a hunk you have not verified.
+to land. A hunk you do not understand is a hunk you have not verified. Before
+reading, run `probe.py corpus --before HEAD`: it groups the changed cases by the
+node types that moved and flags any whose input or leaf order moved — read those
+first.
+
+**Named nodes are not the whole tree.** Corpus trees, census, skeleton and probes
+all compare named nodes, so none of them sees an anonymous token appear or vanish.
+When a change builds an existing node a second way — an alias, an external token,
+another rule — pin both paths against each other with a `:cst` corpus case;
+`references/tree-sitter-mechanics.md` has the scanner pattern that keeps them equal.
 
 **Put the fix through the principles before you put it through the tests.** State,
 in the commit message or PR, which principle justifies it.
@@ -410,19 +418,28 @@ re-parse reuses cached subtrees, and a decision that weighed two complete readin
 does not reliably get re-made. Corpus, examples and queries all parse whole files, so
 none of them can see this — and an editor re-parsing on every keystroke is the
 primary consumer. If fuzz fails, confirm your change caused it by stashing and
-replaying the same seed before you spend time on the parse itself.
+replaying the same seed before you spend time on the parse itself. A pass counts only
+if fuzz could have failed here; `references/tree-sitter-mechanics.md` says how to
+read a failure line and how to run the control.
 
 If the change added a conflict, a recursive rule, a scanner token or a dedicated
-branch, record the before and after size of `src/parser.c` and say what the growth
-bought. Ordinary changes do not need this.
+branch, record the before and after size of `src/parser.c`, its `STATE_COUNT` and
+the examples' parse throughput, and say what the growth bought.
 
 **Record a public AST change where consumers will look.** A new, renamed or removed
 node or field goes in the changelog, called out as a breaking AST change when it is
-one, with the affected queries updated in the same change.
+one, with the affected queries updated in the same change. A change to where a
+construct ends also updates the contract's account of that boundary, residue
+included — `references/docs-contract.md`.
 
 **Report faithfully.** Say which leads still fire and why they are acceptable. A fix
 that resolves one class and leaves a related one open is a fine outcome; a fix
 described as complete when it isn't will be trusted later by someone who shouldn't.
+
+**Have it reviewed cold.** Before it goes out, hand the change to a reviewer with
+this skill and none of your context — a fresh agent will do — asking what a
+maintainer would: what else did this move? Your context hides your assumptions; on
+2026-09-28 a cold review found every gap the maintainer's review then fixed.
 
 ---
 
@@ -438,19 +455,16 @@ repository, and editing them destroys the only reason they are evidence.
 
 # Part 7 · Keep a local audit record
 
-Keep it in the parser repository but **outside version control**, so it stays a
+Keep it in the parser repository's main checkout but **outside version control**, a
 local working note rather than a repository asset or a release gate. Pick a
-directory the repository already ignores and confirm it before writing
-(`git check-ignore -v tmp/`); if nothing is ignored, ask the maintainer where such
-notes belong rather than committing one. Use `assets/audit-log-template.md`.
+directory the repository already ignores and confirm it (`git check-ignore -v tmp/`);
+if nothing is ignored, ask the maintainer. Use `assets/audit-log-template.md`.
 
-It has two parts. The **current state** at the top is rewritten every pass: open
-findings, accepted trade-offs with their reasons, invariants that came back clean,
-what has not been covered yet, and the reference parser's absolute path. Below it,
-one entry per pass is appended and never rewritten: the `provenance` lines, what ran
-and what did not, and one line per finding with a status — `open`,
-`fixed in <commit>`, `accepted`, or `out of scope`. The next pass reads the current
-state; the history is there when a number needs explaining.
+The **current state** at the top is rewritten every pass: open findings, accepted
+trade-offs with their reasons, clean invariants, what is not covered yet, the
+reference parser's absolute path. Below it, one entry per pass is appended and never
+rewritten: the `provenance` lines, what ran and what did not, and one line per
+finding with a status — `open`, `fixed in <commit>`, `accepted`, or `out of scope`.
 
 **The reason attached to an `accepted` or `out of scope` row is the whole point** —
 a status with no reason gets rediscovered and re-argued. And the record must never

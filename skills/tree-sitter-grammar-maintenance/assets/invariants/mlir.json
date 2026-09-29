@@ -14,7 +14,7 @@
       "id": "corpus-op-result",
       "kind": "corpus_balance",
       "layer": 1,
-      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*%)",
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*(?:%|[0-9]|(?:max|min)\\b))",
       "node": "op_result",
       "count_regex": "%[A-Za-z0-9_$.\\-]+(?::[0-9]+)?",
       "why": "The corpus is the persistent AST contract, so a defect recorded there as the expected result is invisible to every gate at once. A case whose expected tree holds a different number of op_result nodes than the names its input binds was accepted from --update without being read. Names are counted, not lines: `%a, %b =` binds two, `%x:2 =` one, and a line binding several would otherwise cover for a binding lost elsewhere in the case."
@@ -36,9 +36,9 @@
       "id": "op-result-binding",
       "kind": "line_produces",
       "layer": 1,
-      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*%)",
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*(?:%|[0-9]|(?:max|min)\\b))",
       "node": "op_result",
-      "why": "op_result is on the Public AST Surface. A line that binds SSA results must produce the binding node; if it does not, the result definition was either dropped or re-attributed to a neighbouring operation, and every def-use consumer is wrong there. A line whose right-hand side starts with % is an operand assignment inside an operation's own syntax (a wrapped iter_args or gpu.launch header), not a binding, and is not checked."
+      "why": "op_result is on the Public AST Surface. A line that binds SSA results must produce the binding node; if it does not, the result definition was either dropped or re-attributed to a neighbouring operation, and every def-use consumer is wrong there. A line whose right-hand side starts with % is an operand assignment inside an operation's own syntax (a wrapped iter_args or gpu.launch header), and one that starts with a digit, max or min is a wrapped affine.for bound (`%i = max affine_map<...>`); neither is a binding, and neither is checked. A binding's `=` is always followed by an operation name."
     },
     {
       "id": "block-label",
@@ -56,7 +56,7 @@
       "check_after_last": [
         "region"
       ],
-      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*%)",
+      "line": "^\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?(\\s*,\\s*%[A-Za-z0-9_$.\\-]+(:[0-9]+)?)*\\s*=(?!=)(?!\\s*(?:%|[0-9]|(?:max|min)\\b))",
       "why": "Principle 4, boundary-preserving, in machine-checkable form. A custom operation body may be parsed coarsely, but it must not extend across a line that binds a new SSA result: that line belongs to the next operation. For an operation with regions, only the rows after its last region closes are checked -- rows inside a region belong to nested operations, which are checked on their own. Deliberately narrow -- it only fires on result bindings, which are unambiguous operation starts."
     },
     {

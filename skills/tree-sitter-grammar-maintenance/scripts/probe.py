@@ -15,7 +15,7 @@ repository.
 Usage:
     probe.py provenance --repo DIR [--spec FILE] [--tool PATH]
     probe.py skeleton   --repo DIR --spec FILE --tool PATH [--limit N] [--out FILE]
-    probe.py corpus     --repo DIR --spec FILE
+    probe.py corpus     --repo DIR --spec FILE [--before REV]
     probe.py probe      --repo DIR --spec FILE [--id ID]... [--files GLOB]
     probe.py census     --repo DIR --spec FILE --out FILE
     probe.py diff       BEFORE.json AFTER.json   (two censuses or two skeletons)
@@ -270,10 +270,14 @@ def attach_first_error(tree, m):
     tree.children.append(node)
 
 
-def parse_batch(repo, cli, files):
-    """Parse files in one CLI invocation; return (path, Node) pairs."""
+def parse_batch(repo, cmd, files):
+    """Parse files in one CLI invocation; return (path, Node) pairs.
+
+    `cmd` is the whole parse command up to the file names, from
+    parse_command.
+    """
     proc = subprocess.run(
-        cli + ["parse"] + files,
+        cmd + files,
         cwd=repo,
         capture_output=True,
         **TEXT,
@@ -575,6 +579,35 @@ def locked_cli(repo):
     return None, "no package-lock.json and no tree-sitter-cli dependency"
 
 
+CI_CLI_PIN = re.compile(r"^\s*tree-sitter-(?:ref|version)\s*:\s*(\S.*?)\s*$", re.M)
+CI_CLI_LITERAL = re.compile(r"[\"']?v?(\d+\.\d+\.\d+)[\"']?$")
+
+
+def ci_cli_pins(repo):
+    """[(file, line, version or None, raw value)] for each CLI input CI sets.
+
+    The lock file says what local runs use; a workflow may still install
+    another release. When CI pinned 0.26.12 under a 0.27.0 lock, its fuzzer
+    compared a `:cst` corpus case as an S-expression and failed a correct
+    tree -- no local measurement could have shown that. A literal pin is
+    synced by hand, since dependency bots bump the lock and not the workflow;
+    a value computed at run time (version None) is read from somewhere else,
+    which is the cure, and the place it reads is what to check.
+    """
+    pins = []
+    for sub in ("workflows", "actions"):
+        pattern = os.path.join(repo, ".github", sub, "**", "*.y*ml")
+        for path in sorted(globlib.glob(pattern, recursive=True)):
+            with open(path, encoding="utf-8", errors="replace") as fh:
+                text = fh.read()
+            for m in CI_CLI_PIN.finditer(text):
+                line = text.count("\n", 0, m.start()) + 1
+                literal = CI_CLI_LITERAL.fullmatch(m.group(1))
+                pins.append((os.path.relpath(path, repo), line,
+                             literal.group(1) if literal else None, m.group(1)))
+    return pins
+
+
 def skill_digest():
     """A hash of this skill's own files: the same for a checkout or a copy,
     whatever line endings the checkout chose."""
@@ -653,6 +686,49 @@ def resolve_cli(spec, grammar_repo):
     return [shutil.which("npx") or "npx", "--no-install", "tree-sitter"]
 
 
+def parse_command(spec, grammar_repo):
+    """The command that parses with this checkout's parser, and no other.
+
+    `tree-sitter parse FILE` picks a grammar by file extension among every
+    grammar the CLI knows -- the ones under `parser-directories` in its
+    config too -- and caches one compiled parser per language name. In a
+    second checkout of the same grammar, a worktree holding a change, it
+    parsed with the first checkout's grammar: `--grammar-path` did not
+    change that, and neither did a separate TREE_SITTER_LIBDIR. A
+    before/after comparison then measures one parser twice. So build this
+    checkout's parser once, keyed by the content of its `src/`, outside the
+    repository, and hand it to `parse --lib-path`.
+    """
+    cli = resolve_cli(spec, grammar_repo)
+    digest = hashlib.sha256()
+    src = os.path.join(grammar_repo, "src")
+    for root, dirs, names in os.walk(src):
+        dirs.sort()
+        for name in sorted(names):
+            path = os.path.join(root, name)
+            digest.update(os.path.relpath(path, src).replace(os.sep, "/").encode())
+            with open(path, "rb") as fh:
+                digest.update(fh.read())
+    ext = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    cache = os.environ.get("PROBE_PARSER_CACHE") or os.path.join(
+        tempfile.gettempdir(), "tree-sitter-probe-parsers")
+    lib = os.path.join(cache, f"{spec['language']}-{digest.hexdigest()[:16]}{ext}")
+    if not os.path.isfile(lib):
+        os.makedirs(cache, exist_ok=True)
+        part = f"{lib[:-len(ext)]}.{os.getpid()}{ext}"
+        proc = subprocess.run(cli + ["build", "-o", part], cwd=grammar_repo,
+                              capture_output=True, **TEXT)
+        if proc.returncode != 0 or not os.path.isfile(part):
+            raise SystemExit(f"`{' '.join(cli)} build` failed in {grammar_repo}:\n"
+                             + (proc.stderr or proc.stdout).strip())
+        try:
+            os.replace(part, lib)
+        except OSError:
+            if not os.path.isfile(lib):  # another run built it first otherwise
+                raise
+    return cli + ["parse", "--lib-path", lib, "--lang-name", spec["language"]]
+
+
 def grammar_cwd(args, repo):
     # The CLI resolves a language from the grammar repository it runs in, so it
     # is run from there even when the files under audit live somewhere else --
@@ -672,12 +748,12 @@ def spec_files(repo, spec, args):
 
 def _reduce_batch(job):
     """Parse one batch and keep only what the reducer extracts per file."""
-    reducer, cwd, cli, files, context = job
+    reducer, cwd, cmd, files, context = job
     return [(path, reducer(path, tree, context))
-            for path, tree in parse_batch(cwd, cli, files)]
+            for path, tree in parse_batch(cwd, cmd, files)]
 
 
-def map_files(cwd, cli, files, args, reducer, context):
+def map_files(cwd, cmd, files, args, reducer, context):
     """Yield (path, reducer(path, tree, context)) for each file, in order.
 
     Building trees from the CLI's output is most of a run's time, so batches
@@ -685,7 +761,7 @@ def map_files(cwd, cli, files, args, reducer, context):
     result a reducer extracts -- hits, counts -- comes back, and results
     arrive in input order whatever the number of workers.
     """
-    jobs = [(reducer, cwd, cli, files[i:i + args.batch], context)
+    jobs = [(reducer, cwd, cmd, files[i:i + args.batch], context)
             for i in range(0, len(files), args.batch)]
     if args.jobs > 1 and len(jobs) > 1:
         try:
@@ -754,6 +830,25 @@ def cmd_provenance(args):
     else:
         cli_line = f"`{found.group(0)}`; {source}"
 
+    pins = ci_cli_pins(repo)
+    want = locked or (found.group(0) if found else None)
+    literal = [p for p in pins if p[2]]
+    derived = [p for p in pins if not p[2]]
+    drifted = [p for p in literal if want and p[2] != want]
+    if not pins:
+        ci_line = "no `tree-sitter-ref` / `tree-sitter-version` in `.github`"
+    elif drifted:
+        ci_line = ("MISMATCH: " + ", ".join(f"`{v}` in {f}:{n}" for f, n, v, _ in drifted)
+                   + f" -- CI runs another CLI than `{want}`")
+        status = max(status, 1)
+    elif literal:
+        ci_line = (f"`{want}` in {len(literal)} literal pin(s) -- synced by hand, "
+                   "so the next lock bump drifts from it")
+    else:
+        f, n, _, raw = derived[0]
+        ci_line = (f"computed at run time (`{raw}` in {f}:{n}) -- confirm it "
+                   "reads the lock")
+
     if args.tool:
         path = resolve_tool(args.tool)
         if path is None:
@@ -768,6 +863,7 @@ def cmd_provenance(args):
     print(f"- **Date:** {datetime.date.today().isoformat()}")
     print(f"- **Branch / commit:** {commit}")
     print(f"- **CLI version:** {cli_line}")
+    print(f"- **CLI in CI:** {ci_line}")
     print(f"- **Reference parser:** {tool_line}")
     print(f"- **Skill:** {skill_identity()}")
     return status
@@ -790,7 +886,7 @@ def cmd_probe(args):
     cwd = grammar_cwd(args, repo)
     results = {inv["id"]: [] for inv in selected}
     n_files = 0
-    for path, per_inv in map_files(cwd, resolve_cli(spec, cwd), files, args,
+    for path, per_inv in map_files(cwd, parse_command(spec, cwd), files, args,
                                    probe_file, (selected, spec.get("skip_line"))):
         n_files += 1
         rel = os.path.relpath(path, repo)
@@ -846,6 +942,15 @@ def split_corpus(text):
         yield name, split[0], split[1]
 
 
+# A `:cst` case records `parse --cst` output, one node per line after its
+# range -- `1:0  - 1:2      lhs: op_result` -- instead of an S-expression.
+CST_RANGE = r"\d+:\d+\s+-\s+\d+:\d+"
+
+
+def is_cst(tree):
+    return re.match(r"\s*" + CST_RANGE, tree) is not None
+
+
 def corpus_balance(inv, src, tree):
     """(how many the input binds, how many nodes the expected tree holds).
 
@@ -862,8 +967,109 @@ def corpus_balance(inv, src, tree):
         m = pat.match(ln)
         if m:
             want += sum(1 for _ in each.finditer(m.group(0))) if each else 1
-    got = len(re.findall(r"\(%s\b" % re.escape(inv["node"]), tree))
+    if is_cst(tree):
+        got = len(re.findall(r"^\s*%s\s+(?:\w+:\s+)?%s\b"
+                             % (CST_RANGE, re.escape(inv["node"])), tree, re.M))
+    else:
+        got = len(re.findall(r"\(%s\b" % re.escape(inv["node"]), tree))
     return want, got
+
+
+CORPUS_LEAF = re.compile(r"\((\w+)\)")
+CORPUS_INNER = re.compile(r"\((\w+)(?=\s)")
+
+
+def corpus_at(repo, rev, paths):
+    """{(corpus file, case name): (input, tree)} as committed at `rev`.
+
+    A file absent at `rev` contributes nothing, so its cases read as new.
+    """
+    cases = {}
+    for path in paths:
+        rel = os.path.relpath(path, repo).replace(os.sep, "/")
+        res = subprocess.run(["git", "-C", repo, "show", f"{rev}:{rel}"],
+                             capture_output=True, encoding="utf-8",
+                             errors="replace")
+        if res.returncode != 0:
+            continue
+        for name, src, tree in split_corpus(res.stdout):
+            cases[(os.path.basename(path), name)] = (src, tree)
+    return cases
+
+
+def corpus_shape_diff(before, after):
+    """Sort the changed cases of a regenerated corpus by what moved.
+
+    `--update` rewrites expected trees with no judgement in it. A fix that
+    only regroups -- a node moving to its neighbour's parent -- keeps every
+    input and the document order of every leaf, and changes only the inner
+    node types it meant to; such cases group by those types, and each group
+    is one thing to confirm. A case whose input or leaf order moved is not a
+    regrouping, and is where the reading starts. Comparing preorder instead
+    would flag every correct regrouping, because the moved node's position
+    in a preorder walk changes with its parent.
+    """
+    groups, flagged = {}, []
+    for key in sorted(set(before) & set(after)):
+        (b_src, b_tree), (a_src, a_tree) = before[key], after[key]
+        if b_src.strip() == a_src.strip() and b_tree.split() == a_tree.split():
+            continue
+        if b_src.strip() != a_src.strip():
+            flagged.append((key, "input changed"))
+        elif is_cst(b_tree) or is_cst(a_tree):
+            flagged.append((key, "a `:cst` case, whose anonymous tokens are the "
+                                 "point; compare it by eye"))
+            continue
+        elif CORPUS_LEAF.findall(b_tree) != CORPUS_LEAF.findall(a_tree):
+            flagged.append((key, "leaves moved, appeared or vanished"))
+        delta = {}
+        for t in CORPUS_INNER.findall(a_tree):
+            delta[t] = delta.get(t, 0) + 1
+        for t in CORPUS_INNER.findall(b_tree):
+            delta[t] = delta.get(t, 0) - 1
+        delta = {t: d for t, d in delta.items() if d}
+        g = groups.setdefault(tuple(sorted(delta)), {"cases": [], "delta": {}})
+        g["cases"].append(key)
+        for t, d in delta.items():
+            g["delta"][t] = g["delta"].get(t, 0) + d
+    new = sorted(set(after) - set(before))
+    gone = sorted(set(before) - set(after))
+    return groups, flagged, new, gone
+
+
+def describe_delta(delta):
+    return ", ".join(f"{t} {d:+d}" for t, d in sorted(delta.items())) or \
+        "no node type moved (nesting or a field changed)"
+
+
+def report_corpus_diff(repo, rev, files, show):
+    before = corpus_at(repo, rev, files)
+    after = {}
+    for path in files:
+        with open(path, encoding="utf-8", errors="replace") as fh:
+            for name, src, tree in split_corpus(fh.read()):
+                after[(os.path.basename(path), name)] = (src, tree)
+    groups, flagged, new, gone = corpus_shape_diff(before, after)
+    n_changed = sum(len(g["cases"]) for g in groups.values())
+    print(f"\ncorpus against {rev}: {n_changed} case(s) changed, "
+          f"{len(new)} new, {len(gone)} removed")
+    if n_changed:
+        print(f"  grouped by the inner node types that moved "
+              f"({len(groups)} group(s)):")
+    ordered = sorted(groups.values(), key=lambda g: (-len(g["cases"]),
+                                                     sorted(g["delta"])))
+    for g in ordered:
+        print(f"    {len(g['cases'])} case(s): {describe_delta(g['delta'])}")
+        for f, name in g["cases"][:min(show, 3)]:
+            print(f"      {f}: {name!r}")
+        if show and len(g["cases"]) > min(show, 3):
+            print(f"      ... {len(g['cases']) - min(show, 3)} more")
+    for (f, name), why in flagged:
+        print(f"  !! {f}: {name!r} -- {why}; read this case first")
+    for f, name in new[:show]:
+        print(f"  new: {f}: {name!r} -- hand-written, so read it against the "
+              f"contract, not against this diff")
+    return len(flagged)
 
 
 def cmd_corpus(args):
@@ -874,7 +1080,8 @@ def cmd_corpus(args):
     there as the intended result, and every gate goes green on the wrong tree.
     This compares each case's input against its own expected tree: exactly
     when the invariant counts what each line binds, and only for a shortfall
-    when it counts lines.
+    when it counts lines. With `--before REV` it also sorts the cases that
+    changed since that revision by what moved.
     """
     spec = load_spec(args.spec)
     repo = os.path.abspath(args.repo)
@@ -928,6 +1135,8 @@ def cmd_corpus(args):
         print("\nAn expected tree that contradicts its own input was accepted "
               "without being read. Fix the grammar first, then regenerate and "
               "read the corpus diff -- never the other way round.")
+    if args.before:
+        total += report_corpus_diff(repo, args.before, files, args.show)
     return 1 if total else 0
 
 
@@ -968,7 +1177,6 @@ def cmd_skeleton(args):
         raise SystemExit("the spec's normalizer declares no counts to compare")
     repo = os.path.abspath(args.repo)
     cwd = grammar_cwd(args, repo)
-    cli = resolve_cli(spec, cwd)
     tool = declared_tool(args.tool, norm)
     command = [tool] + norm.get("args", [])
 
@@ -1001,7 +1209,8 @@ def cmd_skeleton(args):
                 fh.write(out)
             pairs.append((src, dst))
         both = [path for pair in pairs for path in pair]
-        counts = dict(map_files(cwd, cli, both, args, measure_file, counts_spec))
+        counts = dict(map_files(cwd, parse_command(spec, cwd), both, args,
+                                measure_file, counts_spec)) if both else {}
         for src, dst in pairs:
             compared += 1
             rel = os.path.relpath(src, repo)
@@ -1176,7 +1385,7 @@ def cmd_census(args):
     files = spec_files(repo, spec, args)
     cwd = grammar_cwd(args, repo)
     census, shapes = {}, {}
-    for path, (counts, shape) in map_files(cwd, resolve_cli(spec, cwd), files,
+    for path, (counts, shape) in map_files(cwd, parse_command(spec, cwd), files,
                                            args, census_file, None):
         rel = os.path.relpath(path, repo)
         census[rel], shapes[rel] = counts, shape
@@ -1193,6 +1402,25 @@ def cmd_census(args):
     print(f"census: {len(census)} file(s), {sum(total.values())} node(s), "
           f"{len(total)} distinct type(s) -> {args.out}")
     return 0
+
+
+def moved_type_groups(before, after, files):
+    """Group files by the set of node types whose count moved in them.
+
+    A fix moves most files the same way, and those are one change to explain.
+    The small group that moved a type nobody expected is the lead, and in a
+    flat file list it hides among hundreds of the expected kind.
+    """
+    groups = {}
+    for f in files:
+        b, a = before[f], after[f]
+        delta = {t: a.get(t, 0) - b.get(t, 0) for t in set(a) | set(b)
+                 if a.get(t, 0) != b.get(t, 0)}
+        g = groups.setdefault(tuple(sorted(delta)), {"files": [], "delta": {}})
+        g["files"].append(f)
+        for t, d in delta.items():
+            g["delta"][t] = g["delta"].get(t, 0) + d
+    return sorted(groups.items(), key=lambda kv: (-len(kv[1]["files"]), kv[0]))
 
 
 def cmd_diff(args):
@@ -1253,7 +1481,15 @@ def cmd_diff(args):
 
     print(f"\nfiles present in both, parsing differently: "
           f"{len(recounted) + len(reshaped)}")
-    listing("node counts changed", recounted)
+    groups = moved_type_groups(before, after, recounted)
+    print(f"  node counts changed: {len(recounted)}, in {len(groups)} group(s) "
+          f"by the types that moved")
+    for types, g in groups:
+        print(f"    {len(g['files'])} file(s): {describe_delta(g['delta'])}")
+        for f in g["files"][:min(args.show, 3)]:
+            print(f"      {f}")
+        if args.show and len(g["files"]) > min(args.show, 3):
+            print(f"      ... {len(g['files']) - min(args.show, 3)} more")
     listing("same counts, different shape (a span, parent or field moved)",
             reshaped)
     if not (b_shapes and a_shapes):
@@ -1315,6 +1551,10 @@ def main(argv=None):
     p.add_argument("--id", action="append", default=[])
     p.add_argument("--show", type=int, default=10,
                    help="cases to list; 0 for summary lines only")
+    p.add_argument("--before", metavar="REV",
+                   help="also sort the cases changed since this git revision "
+                        "(e.g. HEAD, after `tree-sitter test --update`) by "
+                        "what moved")
     p.set_defaults(func=cmd_corpus)
 
     p = sub.add_parser("probe", help="check structural invariants")
