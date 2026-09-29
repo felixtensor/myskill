@@ -14,6 +14,7 @@ repository first — this file tells you how to *use* it, not what it says.
 | Compatibility smoke | `examples/`, pinned by `examples/SOURCE.md` |
 | Grammar / scanner | `grammar.js`, `src/scanner.c` |
 | Roadmap and complexity budget | a development plan document, if the project keeps one — see below |
+| Audit record (`SKILL.md` Part 7) | local and untracked; it has lived at `tmp/AUDIT-LOG.md` in the main checkout, which a worktree does not have |
 
 ## Which document governs what
 
@@ -89,12 +90,16 @@ The document says this directly — an `ERROR` inside one custom operation is
 preferable to a clean-looking parse that absorbs later siblings. Quote that line
 when someone proposes widening a fallback to remove an `ERROR`.
 
-How the spec checks these boundaries, and where it cannot:
+The contract's "Where a Custom Body Ends" table says, for every way the next
+operation can begin, whether and how a custom body stops before it — including the
+known limit, a default-dialect bare name that binds nothing. Read it before judging
+a boundary hit. How the spec checks these boundaries, and where it cannot:
 
 - **The next operation** — a line that binds results (`custom-body-boundary`) or
   starts a generic operation (`custom-body-generic-op`) must not fall inside a
   custom body. The second matters because an operation that binds nothing, once
-  swallowed, leaves no trace any other check can see.
+  swallowed, leaves no trace any other check can see. Both have been regression
+  guards since the scanner's boundary tokens landed (#74, #75): expect zero.
 - **A block label** — every line-initial label must yield a `block_label`
   (`block-label`). No body ran over a label line in the 617 examples on
   2026-09-28.
@@ -102,7 +107,9 @@ How the spec checks these boundaries, and where it cannot:
   attribute dictionary also closes with `}` (`func.func @f() attributes {` …
   `}`), so a `}` line inside a body proves nothing by itself; 89 such lines on
   2026-09-28 mixed real absorptions with attribute dictionaries.
-- **The operation-level `loc(...)`** — not checked yet.
+- **The operation-level `loc(...)`** — checked once by hand on 2026-09-28: 87
+  line-final operation-level locations in 9 files, all in the operation's
+  `location` field. No spec invariant yet, and the examples carry few locations.
 
 **Runtime dialect semantics — out of scope.** Registered assembly callbacks,
 verifier rules, traits, interfaces, lowering. Record a limit; add no grammar.
@@ -135,14 +142,15 @@ operation's trailing location. A new branch must clear the same bar.
 
 ## Verifying the document against the code
 
-| Claim | Command | Value when last checked (2026-09-21) |
+| Claim | Command | Value when last checked (2026-09-29, `main` @ `ec93b00`) |
 | --- | --- | --- |
 | "The 11 conflicts listed in grammar.js" | `sed -n '/conflicts: (\$) =>/,/^  \],/p' grammar.js \| grep -cE '^\s*\[\$\.'` | 11 — accurate |
-| "emits three token kinds", "no persistent state" | `sed -n '/enum TokenType/,/};/p' src/scanner.c`; read `serialize` | 3 tokens, `serialize` returns 0 — accurate |
+| "emits five token kinds", "no persistent state" | `sed -n '/enum TokenType/,/};/p' src/scanner.c`; read `serialize` | 5 tokens, `serialize` returns 0 — accurate |
+| "Where a Custom Body Ends" table | each row's opener after a custom body, parsed; `custom-body-boundary` and `custom-body-generic-op` at zero | — |
 | Public AST surface names are real | grep each name in `src/node-types.json` | — |
-| Query status table in `QUERIES.md` | `ls queries/`; compile each | 6 files — accurate |
+| Query status table in `QUERIES.md` | `ls queries/`; compile each | 6 files — accurate (2026-09-21) |
 | Capture vocabulary in `QUERIES.md` | compare against captures in `queries/highlights.scm` | — |
-| Gate commands | compare against `package.json` scripts and `.github/workflows/` | — |
+| Gate commands, and the CLI CI installs | compare against `package.json` scripts and `.github/`; `probe.py provenance` reads the CLI pins | — |
 
 Record the date you checked. A table that is right today and unverified for a year
 is indistinguishable from a wrong one.
@@ -159,6 +167,10 @@ is indistinguishable from a wrong one.
   direct regression guard for it.
 - `x` is a dimension separator in `16x16` and a bare identifier elsewhere — the
   scanner's third token.
+- A line-start `%x =` or `"op"(` begins the next operation after a custom body;
+  mid-line, and inside the body's own groups, the same text is body syntax. The
+  scanner's two boundary tokens exist for that, and they open the ordinary
+  `value_use` and `string_literal` rather than replacing them.
 - `loc(...)` is an operation's trailing location in one position and body syntax in
   another. Two dedicated branches exist only because of this.
 - Test files under `examples/` are FileCheck tests. `// CHECK:` lines contain
@@ -299,6 +311,13 @@ A ceiling has a blind side too. A swallowed operation makes the grammar count
 *fewer* operations — the direction a ceiling expects — so no count can show it.
 Lost operations are the boundary invariants' job.
 
+And a correction can move a ceiling the wrong way. Removing structure the grammar
+invented lowers its count, *away* from a reference that counts more for its own
+reasons, so a skeleton `diff` reports the file as further. On 2026-09-28 the
+result-binding fix did this to one file: `{constant, allow_integer_type}` on a
+generic operation stopped parsing as a region. The explanation is the phantom node;
+name it rather than treating the flag as a regression.
+
 **The results-bound caveat, learned the hard way.** Result counts are *not*
 exactly equal under parse-and-print. MLIR lets an operation's results go unnamed,
 and the printer then invents a name for them:
@@ -317,6 +336,18 @@ report**, not a pass/fail gate:
   operations each lose their binding produces exactly this shape.
 - **grammar count < reference count, gap of one or two** — most often the unnamed
   result above. Confirm before reporting it as a defect.
+
+A second reason produces large gaps, not small ones. A named structured operation
+prints a region its source never writes: `linalg.matmul ins(...) outs(...)` has an
+implicit body, and generic form prints it with its `arith` operations and their
+results — four bindings for one matmul. Once the result-binding defect was fixed
+on 2026-09-28, the largest remaining gaps were all of this kind.
+
+So before opening a large gap, run `probe --id op-result-binding --files FILE`.
+No hit means every binding the source writes came back as a result, and the gap
+belongs to the reference. Over all files, zero hits is also the acceptance check
+for a binding fix; on 2026-09-28 a per-file count of the names the source binds
+agreed with it exactly, 30 269 of 30 269.
 
 Do not turn this into a pass/fail CI gate. It is a ranked lead generator whose top
 entries are worth opening, and the caveat above means a green number would be
@@ -431,3 +462,8 @@ python3 scripts/probe.py probe --repo "$OUT" --grammar-repo "$REPO" \
 The lesson to carry: the defect lived in the most ordinary syntax in the language,
 the corpus had been taught to expect it, and every gate agreed. Audit the boring
 constructs first, and never accept a generated expected tree you have not read.
+
+How it was fixed, and what the fix itself got wrong before review caught it —
+a weighting that failed fuzz, then a scanner token that dropped an anonymous child —
+is in `references/tree-sitter-mechanics.md`, "When a full parse is right and an
+incremental one is not".

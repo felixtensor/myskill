@@ -19,6 +19,7 @@ relevant area, and whenever you are asked to check for drift:
 | Capture vocabulary | compare the documented list against the captures in `queries/highlights.scm` |
 | Dedicated dialect branches and their stated reasons | grep the named rules in `grammar.js` |
 | Named gates and commands | compare against `package.json` scripts and the CI workflows |
+| The CLI CI installs | `probe.py provenance`: a literal pin must match the lock, and is hand-synced even then |
 
 Stale counts and dropped rationale are not cosmetic. The contract's authority comes
 entirely from being accurate; once one table is known to be wrong, nobody checks
@@ -30,6 +31,24 @@ new dedicated branch: each is a contract amendment and needs its reason recorded
 next to it, not just its existence. Update `docs/QUERIES.md` too whenever node
 names or capture choices move — it is the consumer-facing half of the same
 contract.
+
+**A change to where a construct ends documents the whole boundary, not the one case
+it fixed.** List every way the next construct can begin and whether each one ends
+the current one, and by what — the fixed case, the cases that already worked, the
+known limits. State what the new rule assumes (a line start, say), and its residue
+in both directions: what is still absorbed, and what is now cut that should not be,
+with how often the pinned examples show each. The rows still marked "absorbed" are
+the next findings; in tree-sitter-mlir the follow-up fix came straight from one.
+
+**Correct what the change disproves.** A grammar comment, a doc sentence or a
+changelog line that explains a mechanism the change showed to be false — "negative
+dynamic precedence makes the parser prefer ending the body" — is now a wrong
+instruction to the next reader. Grep for the rules you touched and fix the
+explanations in the same change.
+
+**Changelog entries are for consumers.** One or two lines: what a query or binding
+now sees that it did not before, never the mechanism. A follow-up that corrects an
+unreleased change amends nothing new; the original entry already covers it.
 
 **And hold the line from `SKILL.md` Part 2.** Updating a table to match reality is
 maintenance. Editing a principle so a patch becomes acceptable is not maintenance,

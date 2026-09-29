@@ -27,7 +27,10 @@
   → 改动前后各跑一次 `census`（写到 `mktemp -d` 的目录），`diff` 之后逐条说明每类计数变化
   和每个"计数相同、形状不同"的文件为什么应该变。有 reference parser 时，再各存一次
   `skeleton --out` 并 `diff`：文件只能离 reference 更近；变远、新出现高于 reference、或
-  reference 一侧变了，都要给出解释。只跑 `npm run test` 绿了就说没问题，属于未完成。
+  reference 一侧变了，都要给出解释。corpus 有重新生成的用例时跑 `corpus --before HEAD`。
+  改动让同一个节点多了一条生成路径（alias、外部 token、另一条规则）时，查有没有 `:cst`
+  用例比对两条路径——具名节点相同不等于树相同。只跑 `npm run test` 绿了就说没问题，
+  属于未完成。
 - **"某某方言的这个语法解析得很难看，加个规则支持一下"**
   → 落层。落在第二行且外层边界完好时，回答是"这是契约内的取舍，不改"，并说明理由；要改
   必须过 Part 5 的四个条件，包含未知 `test.*` dialect 的 fallback 回归用例。
@@ -72,13 +75,25 @@
 - **用户没有 reference parser** —— 其余检查照常进行。报告里写明对比没有运行、覆盖面因此
   缩小；不要把"没跑"说成"跑过没问题"。
 - **声明的工具通不过自检**（比如给的是 `opt`）—— `skeleton` 以 2 退出。回去问用户要正确
-  的工具，不换一个自己找的。
+  的工具，不换一个自己找的。审计记录里登记了另一个路径时也一样：问用户要不要改用它，
+  不自己换过去。
+- **同一个 grammar 有多个 checkout**（改动放在 worktree 里、对照组、并行的 agent）——
+  `tree-sitter parse` 按扩展名在它知道的所有 grammar 里挑，包括 CLI 配置
+  `parser-directories` 下的其他 checkout；在 worktree 里它用了主 checkout 的 grammar，
+  加 `--grammar-path`、换独立的 `TREE_SITTER_LIBDIR` 都没用。`probe.py` 先
+  `tree-sitter build` 出当前 checkout 的解析器、按 `src/` 内容缓存在临时目录，再用
+  `parse --lib-path` 解析；手工解析也要这么做。之前的测量没出错，是因为先跑了
+  `tree-sitter test`，它编译的是当前目录，后面的 `parse` 凭文件时间碰巧没有重编。
 - **所有文件都被 reference parser 拒收** —— `skeleton` 打印 `NOTHING WAS COMPARED` 并以 2
   退出。这不是通过：放宽文件选择，或在报告里写明对比没有运行。
 - **CLI 与锁文件版本不一致** —— `provenance` 以 1 退出并标出 MISMATCH。先问用户再跑
   `npm ci`（会联网改写 `node_modules`）。已经踩过的坑：npm 可能拦截 `tree-sitter-cli` 的
   install script，装出一个没有二进制的包，`npm ci` 不等于环境就绪。修完重跑 `provenance`；
   仍然跑不起来，补装 release 二进制之前再问一次，并说明下载地址。
+- **CI 装的 CLI 与锁文件不一致** —— `provenance` 的「CLI in CI」一行标出 MISMATCH 并以 1
+  退出。本地数字没问题，但 CI 的 fuzz 可能在正确的树上失败（旧 CLI 把 `:cst` 用例当
+  S 表达式比）。写死的版本号即使一致也会提示「手工同步」：依赖机器人只升锁文件，不改
+  workflow。改成从锁文件读版本是维护者的决定，报告里提出即可。
 - **仓库没有 `package-lock.json`**（`tree-sitter-tablegen` 当前如此）—— `provenance` 会报告
   `package.json` 里声明的版本范围。写明实际测量用的版本，并说明 CI 取的是该范围内的最新版。
 - **`npx` 无法联网** —— 用仓库内已安装的 CLI，不要静默换版本。`probe.py` 本来就优先直接调用
@@ -150,6 +165,33 @@ python3 scripts/test_probe.py
 | census 在计数相同、形状不同时仍然报告 | span 或父节点变了的改动被报告成 inert |
 | `--limit` 均匀抽样；声明的工具必须通过 spec 的自检；没声明时拒绝运行；一个文件都没比较时以 2 退出 | 只抽到少数几个目录；在一个没人选过的二进制上得出看似权威的数字；什么都没比较却报告通过 |
 | `provenance` 标出 CLI 与锁文件不一致，没有锁文件时说明版本范围 | 在 CI 不会构建的 parser 上测量 |
+| `provenance` 读 `.github` 下 workflow 和 composite action 的 CLI 输入：写死且不一致报 MISMATCH，写死但一致提示手工同步，运行时计算的指出在哪一行 | CI 固定 0.26.12、锁文件是 0.27.0，持续了两次版本升级；CI 的 fuzz 在一个正确的 `:cst` 用例上失败才暴露 |
+| census `diff` 按「哪些类型变了」给文件分组 | 482 个变动文件里只有一个少了 region，淹没在平铺列表里；两个 agent 各自手写了按类型归因的脚本 |
+| `corpus --before REV` 按内部节点类型给变动用例分组，输入或叶子顺序变了的单独标出；比叶子顺序而不是前序 | 44 个重新生成的用例只能靠手写脚本核对，第一版脚本按前序比较，把每个正确用例都标成违规 |
+| 每个 checkout 用自己 `src/` 编出的解析器：`build` 一次、按内容缓存、`parse --lib-path` | 在 worktree 里量合并后的 main，结果和修复前一模一样——量的是主 checkout 的旧解析器 |
+| `:cst` 用例按 CST 行格式计数；`--before` 对比时单独标出 | `:cst` 用例被当成 S 表达式数，报成少了一个绑定 |
+| 绑定行正则排除 `=` 后接数字、`max`、`min` 的行 | 换行的 `affine.for` 下界 `%i = max …` 被当成绑定，main 上专门钉这个形状的用例被报成缺陷 |
 
 tree-sitter CLI 升级后，先在新版本下重抓夹具里的 parse 输出，再跑这组测试：输出格式的
 变化应该先在这里暴露，而不是在一次审计里悄悄出错。
+
+## 8 · 冷启动记录
+
+每个案例交给一个新 agent，只给用户原话，加上"无人值守、需要问就停下、不要提交"的
+说明，不提 skill 的名字。最后看它有没有触发、按什么顺序做了什么、写过哪些文件。
+
+2026-09-28，skill 内容 `6e11a2b2ac03`，tree-sitter-mlir @ `a3bf55c`：
+
+| 案例 | 触发 | 关键行为 | 偏差与代价 |
+| --- | --- | --- | --- |
+| §1「有没有被 fallback 遮掩的问题」 | 是 | 先读契约和审计记录；provenance、generate、基线；skeleton → corpus → probe；按 mode 落层；不改 grammar；审计记录重写当前状态并追加一轮 | 新确认两条稳定核心缺陷，并给出按文件的验收标准。68 次工具调用，约 17 分钟 |
+| §2「affine.for 的语义」 | 否 | 直接回答，不跑探针 | 无 |
+| §4 声明的工具是 `opt` | 是 | 自检失败、以 2 退出后停下来问；没有自己换成审计记录里的 `mlir-opt` | 没读契约就先跑 skeleton；审计记录是翻被忽略的目录找到的。已补：`mlir.md` 写明记录位置，Part 0 写明要先问 |
+| §1「给 gpu.launch 加个规则」 | 是 | 落在第二行，按 `amdgpu.mfma` 先例判为不改，逐条说明四个条件不满足；把附近真正的边界问题归到已开着的 finding 1；列出要用户回答的问题 | 无。41 次工具调用 |
+| §1「改了 grammar，看有没有副作用」（对象是 #74 的修复） | 是 | 另建一份 HEAD 副本、各用独立的 `TREE_SITTER_LIBDIR` 做前后 census 和 skeleton 并 `diff`；逐类解释计数变化；额外 fuzz、围绕绑定行的增量编辑、对抗输入、触发行的上一行扫描 | 无。提出的四个问题——「never」说得太满、`"` 和不带点名字两个分支没有用例、代价没记录、同行和未绑定的残留——与维护者 review 时补的提交一一对应。中途被用量上限打断，续跑完成 |
+
+最后一行是这一轮最重要的结果：按 skill 做冷启动 review，找到的正是维护者 review 找到的
+缺口，而写修复的 agent 自己没看到。`SKILL.md` Part 5 因此加了「Have it reviewed cold」。
+仍然没有一个 agent 发现 #74 的 scanner token 丢了匿名的 `%` 子节点——具名节点相同，
+所有检查都只比具名节点。那是后续 #75 在做同类 token 时发现的，现在由 Part 5 的
+「Named nodes are not the whole tree」和一个 `:cst` 用例守住。
