@@ -12,7 +12,8 @@ relevant area, and whenever you are asked to check for drift:
 
 | Claim in the document | Confirm with |
 | --- | --- |
-| Declared conflict count | `sed -n '/conflicts: (\$) =>/,/^  \],/p' grammar.js \| grep -cE '^\s*\[\$\.'` |
+| Declared conflict count, and that each one is needed | regenerate first (`SKILL.md` Part 0), then `probe.py conflicts --repo "$REPO"`: the count, from `src/grammar.json`, then an UNNECESSARY or DUPLICATE line for any declaration the grammar does not need |
+| Each conflict's documented cause | the symbol sequence and interpretations the same command prints for it |
 | Scanner token kinds and persistent state | `sed -n '/enum TokenType/,/};/p' src/scanner.c`, and check `serialize` |
 | Public AST surface node names exist | grep each name in `src/node-types.json` |
 | Query files and their status table | `ls queries/`, then compile each one |
@@ -28,9 +29,11 @@ the rest against it, and the plumb line is gone.
 **When a change alters the contract, update the document in the same change.** A
 new node or field, a renamed field, a new conflict, a new scanner responsibility, a
 new dedicated branch: each is a contract amendment and needs its reason recorded
-next to it, not just its existence. Update `docs/QUERIES.md` too whenever node
-names or capture choices move — it is the consumer-facing half of the same
-contract.
+next to it, not just its existence. For a conflict, the reason is the short form of
+the record in `references/tree-sitter-mechanics.md`: what is ambiguous, whether
+both readings can complete, and what decides it. Update `docs/QUERIES.md` too
+whenever node names or capture choices move — it is the consumer-facing half of the
+same contract.
 
 **A change to where a construct ends documents the whole boundary, not the one case
 it fixed.** List every way the next construct can begin and whether each one ends

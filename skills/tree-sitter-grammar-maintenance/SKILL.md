@@ -1,6 +1,6 @@
 ---
 name: tree-sitter-grammar-maintenance
-description: Work on a tree-sitter grammar as a closed loop — compare against the language's own reference parser, locate the defect, fix it, verify, repeat — and hold every change against the architecture contract so a fix for one dialect cannot quietly narrow the general parsing path. Use it to find the root cause of a failing corpus or highlight test, to repair tests after a grammar or scanner edit, to audit for silent misparses that pass every gate, before accepting `tree-sitter test --update` output, when adding support for new syntax, after an upstream example sync, and when docs/ARCHITECTURE.md or docs/QUERIES.md may have drifted. Set up for tree-sitter-mlir; tree-sitter-tablegen and tree-sitter-pdll come under it through onboarding. Expect "why does this test fail", "this parses wrong", "I changed the grammar and tests broke", "扫一下解析有没有问题", "这个语法解析得不对", "加条规则支持这个方言". Not a general MLIR or compiler question answerer.
+description: Work on a tree-sitter grammar as a closed loop — compare against the language's own reference parser, locate the defect, fix it, verify, repeat — and hold every change against the architecture contract so a fix for one dialect cannot quietly narrow the general parsing path. Use it to find the root cause of a failing corpus or highlight test, to repair tests after a grammar or scanner edit, to audit for silent misparses that pass every gate, before accepting `tree-sitter test --update` output, when adding support for new syntax or deciding whether to declare a conflict, after an upstream example sync, and when docs/ARCHITECTURE.md or docs/QUERIES.md may have drifted. Set up for tree-sitter-mlir; tree-sitter-tablegen and tree-sitter-pdll come under it through onboarding. Expect "why does this test fail", "this parses wrong", "I changed the grammar and tests broke", "扫一下解析有没有问题", "这个语法解析得不对", "加条规则支持这个方言". Not a general MLIR or compiler question answerer.
 ---
 
 # Tree-sitter grammar maintenance
@@ -56,7 +56,7 @@ after a fix is the next lead.
 | Read | When |
 | --- | --- |
 | `references/mlir.md` | whenever you work in `tree-sitter-mlir` — its gates, layer table, principles as questions, lexical traps, reference-parser setup, two worked triages |
-| `references/tree-sitter-mechanics.md` | before editing a grammar rule, and when repairing tests after one |
+| `references/tree-sitter-mechanics.md` | before editing a grammar rule or declaring a conflict, and when repairing tests after one |
 | `references/highlight-captures.md` | when the change touches queries or captures |
 | `references/docs-contract.md` | Part 8 |
 | `references/upstream-sync.md` | Part 6 |
@@ -271,6 +271,13 @@ contract statement:
 Keep invariants few, narrow and high-precision. An invariant that fires on ordinary
 correct code is worse than no invariant, because it trains you to skim the output.
 
+**What each declared conflict decides.** A side whose flip moves examples but would
+fail no corpus test is a choice the runtime makes that nothing pins: a lead.
+
+```bash
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip
+```
+
 **Strip comments before any text-level scan**, of sources or of query files: prose
 mentioning `@function` or `%x` is not a capture or a binding. The spec's `skip_line`
 does it for source files; a one-off check has to do it itself. When a check reports
@@ -293,15 +300,10 @@ shape, a span, parent or field that moved. Every group needs an explanation befo
 review, and every kind of real input the change moved owes a corpus case. This is
 the cheapest guard against a dialect-specific fix quietly damaging the general path.
 
-**Parse with this checkout's parser.** `tree-sitter parse` picks a grammar by file
-extension among all it knows, other checkouts in its config included: in a worktree
-it parsed with the main checkout's grammar despite `--grammar-path` and its own
-`TREE_SITTER_LIBDIR`. `probe.py` builds and loads the checkout's own; by hand, run
-`tree-sitter build -o LIB`, then `parse --lib-path LIB --lang-name NAME`.
-
-A census is a scratch measurement for one change. Write it to a temporary path,
-never into the repository — a committed baseline is the persistent snapshot the
-project has already decided not to maintain.
+**Parse by hand with this checkout's parser:** `tree-sitter build -o LIB`, then
+`parse --lib-path LIB --lang-name NAME`. A plain `parse` picks a grammar by
+extension, and in a worktree it used the main checkout's. A census goes to a
+temporary path, never into the repository (Part 9).
 
 **The reference parser also answers one question the skeleton check does not:**
 whether an input is legal at all. The language layer has the command. Ask it before
@@ -374,6 +376,12 @@ in the commit message or PR, which principle justifies it.
 that decide which grammar edit can possibly work; read it before the edit, not after
 one mysteriously does nothing.
 
+**A conflict is a modelling decision, not a defeat.** Languages are locally
+ambiguous, and tree-sitter is GLR so a grammar can say so. Refuse a conflict without
+its record, or one that leaves a genuine ambiguity to rule order. The mechanics file
+has the ladder and the record; after any conflict or weight change,
+`probe.py conflicts --runtime --flip` measures what it decides.
+
 **A dedicated rule for one construct needs all four of these**, not three:
 
 1. A specific issue, an upstream failure, or a downstream consumer that is blocked.
@@ -394,7 +402,7 @@ through the same list; do not skip a gate that applies. The language layer lists
 repository's own; the shape is:
 
 ```bash
-npx tree-sitter generate       # must exit 0; declared conflict count must not silently grow
+npx tree-sitter generate       # must exit 0; a newly declared conflict carries its record
 npm run test                   # corpus + highlight fixtures
 npm run test:examples          # ERROR/MISSING smoke over pinned examples
 npm run fuzz                   # where it exists: scanner, generated-parser, corpus or fuzz-runner changes
@@ -421,8 +429,8 @@ if fuzz could have failed here; `references/tree-sitter-mechanics.md` says how t
 read a failure line and how to run the control.
 
 If the change added a conflict, a recursive rule, a scanner token or a dedicated
-branch, record the before and after size of `src/parser.c`, its `STATE_COUNT` and
-the examples' parse throughput, and say what the growth bought.
+branch, record `src/parser.c` size, `STATE_COUNT` and parse throughput before and
+after, and what the growth bought.
 
 **Record a public AST change where consumers will look.** A new, renamed or removed
 node or field goes in the changelog, called out as a breaking AST change when it is

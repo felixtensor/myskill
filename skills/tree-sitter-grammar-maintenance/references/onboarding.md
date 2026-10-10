@@ -46,6 +46,17 @@ what later changes argue against. Reconstructing a rationale years later is much
 harder than writing it down now, and an undocumented conflict is one nobody dares
 remove.
 
+For the conflicts, `probe.py conflicts --runtime --flip` works without a spec or
+contract, and does most of this step. It shows what each declaration resolves,
+whether it is ever a genuine ambiguity, and what decides it. Pass `--cli` when the
+repository has no CLI installed, and record which one you used. tree-sitter-tablegen
+declares two conflicts and records a reason for neither (2026-10-10, `98e8879`,
+measured with CLI 0.27.0 through `--cli`; its CI takes the newest 0.26.x).
+One of them, `range_piece × _simple_value`, is a genuine ambiguity at
+`foreach i = 1 in`. Symbol order decides it, no input covers it, and reordering two
+rules flips the tree. Settling which reading is right is the first question its
+contract has to answer.
+
 **5 · Find the reference parser, and what survives its parse-and-print.** This is
 the skill's strongest line of evidence, so settle it before writing any invariant —
 invariants are for what it cannot reach. Both languages have one in the LLVM tree:

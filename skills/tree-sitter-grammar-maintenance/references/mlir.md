@@ -144,7 +144,7 @@ operation's trailing location. A new branch must clear the same bar.
 
 | Claim | Command | Value when last checked (2026-09-29, `main` @ `ec93b00`) |
 | --- | --- | --- |
-| "The 11 conflicts listed in grammar.js" | `sed -n '/conflicts: (\$) =>/,/^  \],/p' grammar.js \| grep -cE '^\s*\[\$\.'` | 11 — accurate |
+| "The 11 conflicts listed in grammar.js" are load-bearing | `probe.py conflicts --repo "$REPO"` | 11, none unnecessary — accurate (2026-10-10, `dff9e35`) |
 | "emits five token kinds", "no persistent state" | `sed -n '/enum TokenType/,/};/p' src/scanner.c`; read `serialize` | 5 tokens, `serialize` returns 0 — accurate |
 | "Where a Custom Body Ends" table | each row's opener after a custom body, parsed; `custom-body-boundary` and `custom-body-generic-op` at zero | — |
 | Public AST surface names are real | grep each name in `src/node-types.json` | — |
@@ -154,6 +154,51 @@ operation's trailing location. A new branch must clear the same bar.
 
 Record the date you checked. A table that is right today and unverified for a year
 is indistinguishable from a wrong one.
+
+## The declared conflicts, measured
+
+`probe.py conflicts --runtime --flip` on `main` @ `dff9e35`, 2026-10-10, CLI 0.27.0:
+617 examples and 203 corpus cases, 70 seconds.
+
+- **All 11 are needed**: `generate` fails without any one of them. Its symbol
+  sequences name the overlaps in the contract's table, but that does not make each
+  stated cause complete — a same-day pass found rows 1–3 hold only outside custom
+  bodies (`references/validation.md` §8).
+- **Only `_value_use_list × _value_use_and_type` moves no named node either
+  way** — and it is not local. `^bb1(%a : i32)` completes both as the bulk and as
+  the per-pair list inside `_value_arg_list`, and symbol order picks one: the 156
+  `_value_arg_list` choices below. Both readings give the same tree, so the
+  choice is invisible — which makes it rung 1 of the ladder (two hidden rules for
+  one text), not a reason to keep the declaration. Each of the other ten has a
+  rule that moves example trees when favoured. The weight is on the rule, though, and
+  `custom_op_name`, `dialect_namespace` and `attribute_entry` each sit in two
+  declarations, so a move is not proof that this declaration chose it.
+- **The runtime logged 2,610 such choices** — a lower bound: 1,005 in 116 inputs
+  by dynamic precedence, almost all under `_affine_for_operation_repeat1`, which
+  despite its name is the repeat every custom-op body shares; 1,605 in 160 inputs
+  by symbol order,
+  mostly inside custom-body groups (`_custom_body_paren`,
+  `_custom_body_brace_group_repeat1`). A symbol-order choice whose readings give the
+  same named tree is harmless. `--flip` finds the ones that do not.
+- **Five favoured rules move examples that no corpus case pins.** These are leads,
+  not verdicts: each is a corpus case to add, or a finding.
+
+| Favoured side | Examples moved | What moves | Current reading |
+| --- | --- | --- | --- |
+| `_type_list_parens` | 3 | `function_type = () -> ()` in an attribute dictionary gains a `function_type` (`GPU/ops.mlir:532`, `Builtin/Bytecode/types.mlir:90`) | **loses structure — a lead** |
+| `_type_list_no_parens` | 1 | `#gpu.object<#nvvm.target, properties = {…}, …>` ends early | right, unpinned |
+| `_multi_dim_affine_expr_parens` | 1 | a sparse `tensor<…, #sparse_tensor.encoding<{ map = (d0) -> … }>>` breaks | right, unpinned |
+| `attribute_entry` (both of its conflicts) | 4 | `#nvvm.target<…, flags = {fast, ftz}>` ends early | right, unpinned |
+| `_custom_body_array_keyword` | 15 | `values = array<i64: 1, 2>` loses its `array_literal` | right, unpinned |
+
+One more lead `--flip` cannot attribute and `--runtime` does not log: inside a
+custom body, `test.op !foo<i32>` alone parses as a `dialect_type`, and followed by
+another operation as a `type_alias` plus loose tokens. The two readings merge in
+`stack_node_add_link`, which keeps one without a log line.
+
+A right but unpinned reading is protected only by symbol order and by today's
+dynamic precedences. A refactor that reorders rules, or a weight added for an
+unrelated fix, can flip it without failing a single test.
 
 ## MLIR lexical facts an agent gets wrong
 

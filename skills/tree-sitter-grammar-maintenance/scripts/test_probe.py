@@ -1074,5 +1074,310 @@ two bindings
         self.assertIn("'two bindings' -- input changed", text)
 
 
+# What `generate --json-summary` prints on stderr for tree-sitter-tablegen
+# with one of its two declarations removed, captured from 0.27.0.
+RANGE_CONFLICT = {"BuildTables": {"Conflict": {
+    "symbol_sequence": ["'foreach'", "identifier", "'='", "integer_literal"],
+    "conflicting_lookahead": "'in'",
+    "possible_interpretations": [
+        {"preceding_symbols": ["'foreach'", "identifier", "'='"],
+         "variable_name": "_simple_value",
+         "production_step_symbols": ["integer_literal"], "step_index": 1,
+         "done": True, "conflicting_lookahead": "'in'", "precedence": None,
+         "associativity": None, "requires_eof_lookahead": False},
+        {"preceding_symbols": ["'foreach'", "identifier", "'='"],
+         "variable_name": "range_piece",
+         "production_step_symbols": ["integer_literal"], "step_index": 1,
+         "done": True, "conflicting_lookahead": "'in'", "precedence": None,
+         "associativity": None, "requires_eof_lookahead": False}],
+    "possible_resolutions": [
+        {"Precedence": {"symbols": ["_simple_value"]}},
+        {"Precedence": {"symbols": ["range_piece"]}},
+        {"AddConflict": {"symbols": ["_simple_value", "range_piece"]}}]}}}
+POSITIONAL_CONFLICT = {"BuildTables": {"Conflict": {
+    "symbol_sequence": ["'def'", "identifier", "'<'", "_value"],
+    "conflicting_lookahead": "','",
+    "possible_interpretations": [
+        {"preceding_symbols": ["'def'", "identifier", "'<'"],
+         "variable_name": "positional_arguments",
+         "production_step_symbols": ["_value"], "step_index": 1, "done": True,
+         "conflicting_lookahead": "','", "precedence": None,
+         "associativity": None, "requires_eof_lookahead": False},
+        {"preceding_symbols": ["'def'", "identifier", "'<'"],
+         "variable_name": "positional_arguments",
+         "production_step_symbols": ["_value", "bits_value_repeat1"],
+         "step_index": 1, "done": False, "conflicting_lookahead": "','",
+         "precedence": None, "associativity": None,
+         "requires_eof_lookahead": False}],
+    "possible_resolutions": [
+        {"Associativity": {"symbols": ["positional_arguments"]}},
+        {"AddConflict": {"symbols": ["positional_arguments"]}}]}}}
+
+# A fake CLI for `conflicts`. `generate` answers from the declarations the
+# grammar keeps, as 0.27.0 does for tree-sitter-tablegen plus one dead
+# declaration, and a grammar with a `broken` rule never generates; `build` copies the grammar into the "library"; `parse` reads
+# `foreach i = 1 in` the way the real parser does -- an integer_literal --
+# unless range_piece is favoured, and with `-d` logs the choice the way
+# lib/src/parser.c does. Like 0.26 and 0.27, it reads `-d FILE` as a debug
+# mode called FILE.
+CONFLICTS_CLI = f"""\
+import json, os, sys
+args = sys.argv[1:]
+if args == ["--version"]:
+    print("tree-sitter 0.27.0"); sys.exit(0)
+if args[0] == "generate":
+    g = json.load(open(args[1]))
+    if "crash" in g["rules"]:
+        sys.stderr.write("{{}}\\nthread 'main' panicked"); sys.exit(101)
+    kept = [sorted(c) for c in g["conflicts"]]
+    error = None
+    if "broken" in g["rules"] or ["_simple_value", "range_piece"] not in kept:
+        error = {RANGE_CONFLICT!r}
+    elif ["positional_arguments"] not in kept:
+        error = {POSITIONAL_CONFLICT!r}
+    diags = [{{"UnnecessaryConflicts": [["dead"]]}}] if ["dead"] in kept else []
+    out = args[args.index("-o") + 1]
+    if not error:
+        open(os.path.join(out, "parser.c"), "w").close()
+    sys.stderr.write(json.dumps({{"diagnostics": diags, "error": error}}))
+    sys.exit(1 if error else 0)
+if args[0] == "build":
+    lib, root = args[args.index("-o") + 1], args[-1]
+    open(lib, "w").write(open(os.path.join(root, "src", "grammar.json")).read())
+    sys.exit(0)
+debug = "-d" in args
+if debug and args.index("-d") != len(args) - 1:
+    sys.stderr.write("error: invalid value for '--debug'"); sys.exit(2)
+rest, files, lib = iter(args[1:]), [], None
+for a in rest:
+    if a == "--lib-path":
+        lib = next(rest)
+    elif a == "--lang-name":
+        next(rest)
+    elif a != "-d":
+        files.append(a)
+rules = json.load(open(lib))["rules"]
+leaf = "range_piece" if rules["range_piece"].get("type") == "PREC_DYNAMIC" \\
+    else "integer_literal"
+LOGS = {{
+    "WEIGHTED": "select_higher_precedence symbol:loop, prec:1, "
+                "over_symbol:loop, other_prec:0",
+    "SAME": "select_existing symbol:loop, over_symbol:loop",
+    "CAPPED": "aborting reduce with too many versions",
+}}
+for path in files:
+    text = open(path).read()
+    ambiguous = "foreach i = 1 in" in text
+    if debug:
+        if "NOLOG" not in text:
+            sys.stderr.write("new_parse\\n")
+        if ambiguous:
+            sys.stderr.write("select_earlier symbol:foreach_statement, "
+                             "over_symbol:foreach_statement\\n")
+        for word, line in LOGS.items():
+            if word in text:
+                sys.stderr.write(line + "\\n")
+        sys.stderr.write("done\\n")
+    child = f"\\n  ({{leaf}} [0, 12] - [0, 13])" if ambiguous else ""
+    if "SPAN" in text:  # the flip moves only where a node ends
+        end = 14 if leaf == "range_piece" else 13
+        child = f"\\n  (integer_literal [0, 12] - [0, {{end}}])"
+    print(f"(source_file [0, 0] - [1, 0]{{child}})")
+"""
+
+
+class Conflicts(unittest.TestCase):
+    """`conflicts` on tree-sitter-tablegen's two declarations, plus a dead one.
+
+    The tablegen grammar decides `foreach i = 1 in` between two complete
+    readings by symbol order, and no corpus case says which is right: moving
+    the range_piece rule earlier in the grammar flipped the tree.
+    """
+
+    CORPUS = ("==================\nscalar foreach\n==================\n\n"
+              "foreach i = 1 in def A;\n\n---\n\n(source_file)\n")
+
+    def repo(self, tmp, corpus=None, conflicts=None, rules=(), examples=None):
+        os.makedirs(os.path.join(tmp, "src"))
+        os.makedirs(os.path.join(tmp, "examples"))
+        os.makedirs(os.path.join(tmp, "test", "corpus"))
+        names = ["source_file", "range_piece", "_simple_value",
+                 "positional_arguments", "dead"] + list(rules)
+        write(os.path.join(tmp, "src", "grammar.json"), json.dumps({
+            "name": "tablegen",
+            "rules": {n: {"type": "BLANK"} for n in names},
+            "conflicts": conflicts or [["positional_arguments"],
+                                       ["range_piece", "_simple_value"],
+                                       ["dead"]]}))
+        write(os.path.join(tmp, "src", "scanner.c"), "")
+        write(os.path.join(tmp, "tree-sitter.json"),
+              json.dumps({"grammars": [{"name": "tablegen", "file-types": ["td"]}]}))
+        write(os.path.join(tmp, "examples", "loop.td"), "foreach i = 1 in def A;\n")
+        write(os.path.join(tmp, "examples", "plain.td"), "def B;\n")
+        for name, text in (examples or {}).items():
+            write(os.path.join(tmp, "examples", name), text)
+        if corpus:
+            write(os.path.join(tmp, "test", "corpus", "loops.txt"), corpus)
+        return python_tool(tmp, "fake-tree-sitter", CONFLICTS_CLI)
+
+    def conflicts(self, *extra, **repo):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = self.repo(tmp, **repo)
+            return call(["conflicts", "--repo", tmp, "--cli", cli, "--jobs", "1"]
+                        + list(extra))
+
+    def test_each_declaration_is_explained_or_called_dead(self):
+        status, text = self.conflicts()
+        self.assertEqual(status, 1)  # the dead declaration
+        self.assertIn("3 declared conflict(s)", text)
+        self.assertIn("at   'foreach' identifier '=' integer_literal  *  'in'", text)
+        text.encode("ascii")  # a Windows code page cannot print everything
+        self.assertIn("reduce _simple_value", text)
+        self.assertIn("reduce range_piece", text)
+        self.assertIn("precedence on _simple_value; precedence on range_piece", text)
+        self.assertIn("shift  positional_arguments", text)
+        self.assertIn("associativity on positional_arguments", text)
+        self.assertIn("[dead]\n     UNNECESSARY", text)
+
+    def test_only_selects_by_rule(self):
+        status, text = self.conflicts("--only", "range_piece")
+        self.assertEqual(status, 0)
+        self.assertIn("3 declared conflict(s) in src/grammar.json; 1 selected", text)
+        self.assertNotIn("positional_arguments", text)
+
+    def test_runtime_counts_choices_with_debug_after_the_files(self):
+        status, text = self.conflicts("--only", "range_piece", "--runtime")
+        self.assertEqual(status, 0)
+        self.assertIn("inputs: 2 example file(s), 0 corpus case(s)", text)
+        self.assertIn("symbol order: 1 in 1 input(s)", text)
+        self.assertIn("foreach_statement", text)
+        self.assertIn(os.path.join("examples", "loop.td"), text)
+
+    def test_a_choice_no_corpus_case_pins_is_a_finding(self):
+        status, text = self.conflicts("--only", "range_piece", "--flip")
+        self.assertEqual(status, 1)
+        self.assertIn("favour range_piece: 1 example file(s) move; UNPINNED", text)
+        self.assertIn("favour _simple_value: no named node moves", text)
+
+    def test_a_corpus_case_that_moves_pins_the_choice(self):
+        status, text = self.conflicts("--only", "range_piece", "--flip",
+                                      corpus=self.CORPUS)
+        self.assertEqual(status, 0)
+        self.assertIn("pinned by 1 corpus case(s)", text)
+        self.assertIn(os.path.join("test", "corpus", "loops.txt")
+                      + ": scalar foreach", text)
+
+    def test_a_reversed_duplicate_is_one_declaration_twice(self):
+        status, text = self.conflicts(conflicts=[
+            ["positional_arguments"], ["range_piece", "_simple_value"],
+            ["_simple_value", "range_piece"]])
+        self.assertEqual(status, 1)
+        self.assertIn("reduce range_piece", text)  # the first is explained
+        self.assertIn("[_simple_value, range_piece]\n     DUPLICATE", text)
+        self.assertNotIn("UNNECESSARY", text)
+
+    def test_a_crashed_generate_is_not_an_unnecessary_conflict(self):
+        status, text = self.conflicts(rules=["crash"])
+        self.assertEqual(status, 2)
+        self.assertNotIn("UNNECESSARY", text)
+
+    def test_runtime_names_what_decided_each_choice(self):
+        status, text = self.conflicts("--runtime", "--only", "range_piece",
+                                      examples={"w.td": "WEIGHTED\n",
+                                                "s.td": "SAME\n",
+                                                "c.td": "CAPPED\n"})
+        self.assertEqual(status, 0)
+        self.assertIn("whole grammar, not only the selected conflicts", text)
+        self.assertIn("dynamic precedence: 1 in 1 input(s)", text)
+        self.assertIn("symbol order: 1 in 1 input(s)", text)
+        self.assertIn("stack order (equal by symbol; aliases and fields may differ): "
+                      "1 in 1 input(s)", text)
+        self.assertIn("version cap (a lower bound", text)
+
+    def test_a_log_that_does_not_match_the_files_is_refused(self):
+        status, _ = self.conflicts("--runtime", examples={"n.td": "NOLOG\n"})
+        self.assertEqual(status, 2)
+
+    def test_a_rule_in_two_conflicts_is_flipped_once(self):
+        status, text = self.conflicts(
+            "--flip", conflicts=[["positional_arguments"],
+                                 ["range_piece", "_simple_value"],
+                                 ["range_piece", "dead"]])
+        self.assertEqual(status, 1)
+        self.assertEqual(text.count("favour range_piece: 1 example file(s)"), 1)
+        self.assertIn("favour range_piece: as under "
+                      "[range_piece, _simple_value] above", text)
+
+    def test_a_skipped_corpus_case_pins_nothing(self):
+        skipped = self.CORPUS.replace("scalar foreach\n", "scalar foreach\n:skip\n")
+        status, text = self.conflicts("--only", "range_piece", "--flip",
+                                      corpus=skipped)
+        self.assertEqual(status, 1)
+        self.assertIn("0 corpus case(s)", text)
+        self.assertIn("UNPINNED", text)
+
+    def test_a_relative_cli_is_found_from_the_scratch_directory(self):
+        # Relative to a cwd inside the temp dir: on Windows CI the checkout
+        # and the temp dir sit on different drives, where relpath raises.
+        cwd = os.getcwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = self.repo(tmp)
+            os.chdir(tmp)
+            try:
+                status, text = call(["conflicts", "--repo", tmp, "--only",
+                                     "range_piece", "--cli",
+                                     os.path.join(".", os.path.basename(cli))])
+            finally:
+                os.chdir(cwd)
+        self.assertEqual(status, 0, text)
+        self.assertIn("reduce range_piece", text)
+
+    def test_nothing_parsed_is_not_a_clean_flip(self):
+        status, text = self.conflicts("--only", "range_piece", "--flip",
+                                      "--files", "nothing/*.td")
+        self.assertEqual(status, 2)
+        self.assertIn("inputs: 0 example file(s), 0 corpus case(s)", text)
+        self.assertNotIn("no named node moves", text)
+
+    def test_a_grammar_that_does_not_generate_explains_nothing(self):
+        status, text = self.conflicts(rules=["broken"])
+        self.assertEqual(status, 2)
+        self.assertNotIn("at   ", text)
+
+    def test_only_a_failing_corpus_test_pins_a_choice(self):
+        # A span move is invisible to a corpus S-expression, and an `:error`
+        # case has no expected tree: neither would fail `tree-sitter test`.
+        corpus = ("==================\nspan only\n==================\n\n"
+                  "SPAN\n\n---\n\n(source_file (integer_literal))\n"
+                  "==================\nrecovery\n:error\n==================\n\n"
+                  "foreach i = 1 in def A;\n\n---\n")
+        status, text = self.conflicts("--only", "range_piece", "--flip",
+                                      corpus=corpus)
+        self.assertEqual(status, 1)
+        self.assertIn("1 corpus case(s)", text)  # the :error case is no input
+        self.assertIn("favour range_piece: 1 example file(s) move; UNPINNED", text)
+
+    def test_an_unknown_error_shape_is_reported_not_raised(self):
+        lines = probe.explain_conflict({"BuildTables": "TooManyStates"})
+        self.assertTrue(lines[0].startswith("generate failed otherwise"))
+
+    def test_scanner_sources_in_a_directory_are_copied(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            cli = self.repo(tmp)
+            os.makedirs(os.path.join(tmp, "src", "scanner_util"))
+            write(os.path.join(tmp, "src", "scanner_util", "x.h"), "")
+            status, text = call(["conflicts", "--repo", tmp, "--cli", cli,
+                                 "--jobs", "1", "--only", "range_piece",
+                                 "--runtime"])
+        self.assertEqual(status, 0, text)
+
+    def test_no_cli_is_a_tooling_failure_not_a_result(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.repo(tmp)
+            status, _ = call(["conflicts", "--repo", tmp, "--cli",
+                              os.path.join(tmp, "no-such-cli")])
+        self.assertEqual(status, 2)
+
+
 if __name__ == "__main__":
     unittest.main()

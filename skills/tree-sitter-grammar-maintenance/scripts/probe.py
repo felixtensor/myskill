@@ -18,6 +18,7 @@ Usage:
     probe.py corpus     --repo DIR --spec FILE [--before REV]
     probe.py probe      --repo DIR --spec FILE [--id ID]... [--files GLOB]
     probe.py census     --repo DIR --spec FILE --out FILE
+    probe.py conflicts  --repo DIR [--spec FILE] [--only RULE]... [--runtime] [--flip]
     probe.py diff       BEFORE.json AFTER.json   (two censuses or two skeletons)
 
 Exit status: 0 when every selected check holds, 1 on any hit, 2 on a tooling
@@ -686,6 +687,18 @@ def resolve_cli(spec, grammar_repo):
     return [shutil.which("npx") or "npx", "--no-install", "tree-sitter"]
 
 
+LIB_EXT = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+
+
+def build_library(cli, grammar_dir, lib, hint=""):
+    """`tree-sitter build -o LIB` for the grammar in `grammar_dir`."""
+    proc = subprocess.run(cli + ["build", "-o", lib, grammar_dir],
+                          cwd=grammar_dir, capture_output=True, **TEXT)
+    if proc.returncode != 0 or not os.path.isfile(lib):
+        raise SystemExit(f"`{' '.join(cli)} build` failed in {grammar_dir}:\n"
+                         + (proc.stderr or proc.stdout).strip() + hint)
+
+
 def parse_command(spec, grammar_repo):
     """The command that parses with this checkout's parser, and no other.
 
@@ -709,18 +722,14 @@ def parse_command(spec, grammar_repo):
             digest.update(os.path.relpath(path, src).replace(os.sep, "/").encode())
             with open(path, "rb") as fh:
                 digest.update(fh.read())
-    ext = {"win32": ".dll", "darwin": ".dylib"}.get(sys.platform, ".so")
+    ext = LIB_EXT
     cache = os.environ.get("PROBE_PARSER_CACHE") or os.path.join(
         tempfile.gettempdir(), "tree-sitter-probe-parsers")
     lib = os.path.join(cache, f"{spec['language']}-{digest.hexdigest()[:16]}{ext}")
     if not os.path.isfile(lib):
         os.makedirs(cache, exist_ok=True)
         part = f"{lib[:-len(ext)]}.{os.getpid()}{ext}"
-        proc = subprocess.run(cli + ["build", "-o", part], cwd=grammar_repo,
-                              capture_output=True, **TEXT)
-        if proc.returncode != 0 or not os.path.isfile(part):
-            raise SystemExit(f"`{' '.join(cli)} build` failed in {grammar_repo}:\n"
-                             + (proc.stderr or proc.stdout).strip())
+        build_library(cli, grammar_repo, part)
         try:
             os.replace(part, lib)
         except OSError:
@@ -924,22 +933,29 @@ def cmd_probe(args):
     return 1 if total else 0
 
 
-def split_corpus(text):
-    """Yield (name, input, expected_tree) for each case in a corpus file.
+def corpus_cases(text):
+    """Yield (name, attributes, input, expected_tree) for each corpus case.
 
     The corpus format is a header fenced by `=` rules, the input, a `-` rule,
     and the expected S-expression. Header attribute lines (`:skip`, `:error`,
-    `:language`) are not part of the name.
+    `:language(...)`) follow the name.
     """
     parts = re.split(r"^={3,}[ \t]*$", text, flags=re.M)
     for i in range(1, len(parts) - 1, 2):
-        header = parts[i].strip().splitlines()
-        name = header[0].strip() if header else "?"
+        header = [ln.strip() for ln in parts[i].strip().splitlines()]
+        name = header[0] if header else "?"
+        attrs = [ln for ln in header[1:] if ln.startswith(":")]
         body = parts[i + 1]
         split = re.split(r"^-{3,}[ \t]*$", body, maxsplit=1, flags=re.M)
         if len(split) != 2:
             continue
-        yield name, split[0], split[1]
+        yield name, attrs, split[0], split[1]
+
+
+def split_corpus(text):
+    """Yield (name, input, expected_tree) for each case in a corpus file."""
+    for name, _attrs, src, tree in corpus_cases(text):
+        yield name, src, tree
 
 
 # A `:cst` case records `parse --cst` output, one node per line after its
@@ -1507,6 +1523,429 @@ def cmd_diff(args):
     return 1 if (changed_types or recounted or reshaped) else 0
 
 
+# --------------------------------------------------------------------------
+# Declared conflicts
+# --------------------------------------------------------------------------
+
+# Dynamic precedence added to one side of a conflict for the flip test. It is
+# summed over a reading, so it only has to outweigh what the grammar already
+# assigns; any reading that contains the rule wins.
+FLIP_WEIGHT = 10000
+# The runtime's choices between complete readings, from `parse -d`
+# (lib/src/parser.c, ts_parser__select_tree and ts_parser__reduce).
+# `select_existing` is logged when the two subtrees compare equal. The
+# comparison looks at symbols and child counts only, not at aliases or field
+# names, so the reading kept -- the one reached first -- can still differ in
+# those. The version cap is mostly enforced in ts_parser__condense_stack,
+# which logs no line of its own; the reduce-time abort is the only trace, and
+# only some of the time, so its count is a lower bound.
+_DECISION = re.compile(
+    r"^(?P<how>select_higher_precedence|select_earlier|select_existing)"
+    r" symbol:(?P<sym>[^,\s]+)")
+_DROPPED = "aborting reduce with too many versions"
+DECIDED_BY = {
+    "select_higher_precedence": "dynamic precedence",
+    "select_earlier": "symbol order",
+    "select_existing": "stack order (equal by symbol; aliases and fields may differ)",
+    "dropped": "version cap (a lower bound: most drops leave no log line)",
+}
+# What `generate` writes into src/, and so never copies into a variant.
+GENERATED = {"parser.c", "grammar.json", "node-types.json", "tree_sitter"}
+# A corpus case's expected tree names fields when it has `name: (` in it.
+_FIELD = re.compile(r"[A-Za-z_][A-Za-z0-9_]*:\s*\(")
+
+
+def load_grammar_json(repo):
+    path = os.path.join(repo, "src", "grammar.json")
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return json.load(fh)
+    except OSError:
+        raise SystemExit(f"no {path}; run `tree-sitter generate` first")
+
+
+def generate_summary(cli, grammar, workdir):
+    """`generate --json-summary` on a grammar dict: the error it reports.
+
+    It reads `grammar.json` directly, so no JavaScript runs and the grammar
+    repository is untouched. The summary goes to stderr whether or not the
+    tables build.
+    """
+    os.makedirs(os.path.join(workdir, "src"), exist_ok=True)
+    path = os.path.join(workdir, "src", "grammar.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(grammar, fh)
+    proc = subprocess.run(cli + ["generate", path, "-o",
+                                 os.path.join(workdir, "src"), "--json-summary"],
+                          cwd=workdir, capture_output=True, **TEXT)
+    text = proc.stderr + proc.stdout
+    start = text.find("{")
+    try:
+        summary, _ = json.JSONDecoder().raw_decode(text[start:])
+    except (ValueError, json.JSONDecodeError):
+        summary = None
+    # A failure with no error in the summary is not "this grammar generates":
+    # read that way, a crashed CLI reports every declaration unnecessary.
+    if not isinstance(summary, dict) or (proc.returncode != 0
+                                         and not summary.get("error")):
+        raise SystemExit("could not read `generate --json-summary` output; "
+                         "check the CLI version:\n" + text.strip()[:400])
+    return summary.get("error")
+
+
+def explain_conflict(error):
+    """Lines describing the conflict `generate` reports without a declaration."""
+    tables = error.get("BuildTables") if isinstance(error, dict) else None
+    cf = tables.get("Conflict") if isinstance(tables, dict) else None
+    if not isinstance(cf, dict):
+        return [f"generate failed otherwise: {json.dumps(error)[:300]}"]
+    seq = " ".join(cf.get("symbol_sequence", []))
+    lines = [f"at   {seq}  *  {cf.get('conflicting_lookahead')}"]
+    seen = set()
+    for p in cf.get("possible_interpretations", []):
+        what = "reduce" if p.get("done") else "shift"
+        key = (p.get("variable_name"), what)
+        if key in seen:
+            continue
+        seen.add(key)
+        extra = ""
+        if p.get("precedence") is not None or p.get("associativity"):
+            extra = f"  (prec {p.get('precedence')}, {p.get('associativity')})"
+        lines.append(f"     {what:6s} {p.get('variable_name')}{extra}")
+    static = []
+    for r in cf.get("possible_resolutions", []):
+        for kind, body in r.items():
+            if kind == "AddConflict":
+                continue
+            syms = body.get("symbols", []) if isinstance(body, dict) else []
+            static.append(f"{kind.lower()} on {', '.join(syms)}" if syms else kind)
+    lines.append("     static alternatives generate offers: "
+                 + ("; ".join(static) if static else "none"))
+    return lines
+
+
+def favoured(grammar, rule):
+    """The grammar with every reading that contains `rule` preferred."""
+    g = json.loads(json.dumps(grammar))
+    g["rules"][rule] = {"type": "PREC_DYNAMIC", "value": FLIP_WEIGHT,
+                        "content": g["rules"][rule]}
+    return g
+
+
+def build_variant(cli, grammar, repo, workdir, generated=False):
+    """Generate (unless already done) and build a parser for `grammar` beside
+    the repository's own scanner sources; return the library path."""
+    if not generated:
+        error = generate_summary(cli, grammar, workdir)
+        if error:
+            raise SystemExit(f"variant in {workdir} does not generate: "
+                             f"{json.dumps(error)[:300]}")
+    src = os.path.join(repo, "src")
+    try:
+        for name in os.listdir(src):
+            if name in GENERATED:
+                continue
+            here, there = os.path.join(src, name), os.path.join(workdir, "src", name)
+            if os.path.isdir(here):
+                shutil.copytree(here, there)
+            else:
+                shutil.copy(here, there)
+    except OSError as exc:
+        raise SystemExit(f"cannot copy the scanner sources from {src}: {exc}")
+    lib = os.path.join(workdir, "parser" + LIB_EXT)
+    build_library(cli, workdir, lib, hint=(
+        "\nThe variant is built from a copy of src/ in a scratch directory; a "
+        "scanner that includes files outside src/ cannot be built there."))
+    return lib
+
+
+def corpus_inputs(repo, spec, workdir, lang):
+    """Write each corpus case's input to a file.
+
+    Returns {path: (case label, how its tree is compared)}. A `:skip` case
+    pins nothing, an `:error` case has no expected tree, and a `:language`
+    case belongs to another parser; none of them is an input here. The
+    comparison follows `tree-sitter test`: no ranges, and field names only
+    when the expected tree has them; a `:cst` case keeps ranges.
+    """
+    out = {}
+    os.makedirs(workdir, exist_ok=True)
+    for cfile in resolve_files(repo, spec.get("corpus_files",
+                                              ["test/corpus/*.txt"])):
+        with open(cfile, encoding="utf-8") as fh:
+            cases = list(corpus_cases(fh.read()))
+        for name, attrs, src, tree in cases:
+            if ":skip" in attrs or ":error" in attrs or any(
+                    a.startswith(":language(") and a != f":language({lang})"
+                    for a in attrs):
+                continue
+            how = ("cst" if ":cst" in attrs
+                   else "fields" if _FIELD.search(tree) else "plain")
+            path = os.path.join(workdir, f"case-{len(out):05d}.txt")
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write(src.strip("\n") + "\n")
+            out[path] = (f"{os.path.relpath(cfile, repo)}: {name}", how)
+    return out
+
+
+def example_inputs(repo, spec, args):
+    """The example set: --files, the spec's globs, or examples/ by the file
+    types tree-sitter.json declares. Empty is allowed; the corpus may carry
+    the run on its own."""
+    patterns = args.files or (spec or {}).get("files")
+    if not patterns:
+        try:
+            with open(os.path.join(repo, "tree-sitter.json"), encoding="utf-8") as fh:
+                types = [t for g in json.load(fh).get("grammars", [])
+                         for t in g.get("file-types", [])]
+        except (OSError, json.JSONDecodeError):
+            types = []
+        patterns = [f"examples/**/*.{t}" for t in types]
+    return resolve_files(repo, patterns)
+
+
+def sexp(node, fields):
+    """A named-node S-expression without ranges, as `tree-sitter test` reads."""
+    head = node.type + (f" {node.detail}" if node.detail else "")
+    inner = "".join(" " + ((f"{c.field}: " if fields and c.field else "")
+                           + sexp(c, fields)) for c in node.children)
+    return f"({head}{inner})"
+
+
+def pin_file(path, tree, how_by_path):
+    """What a flip has to change in this input to count: the tree a corpus
+    test compares, or for an example, its whole shape."""
+    how = how_by_path.get(path)
+    if how in ("plain", "fields"):
+        return sexp(tree, how == "fields")
+    return census_entry(tree)
+
+
+def runtime_decisions(cmd, files, args):
+    """{(how, symbol): [file, ...]} for every choice the runtime made between
+    complete readings while parsing `files`.
+
+    `-d` takes an optional value in CLI 0.26 and 0.27, so it goes after the
+    file names: `parse -d FILE` reads FILE as the debug mode. The log runs to
+    about 80 times the input, so it is read as a stream, never held whole.
+    """
+    def one_batch(batch):
+        found, i = [], -1
+        proc = subprocess.Popen(cmd + batch + ["-d"], stdout=subprocess.DEVNULL,
+                                stderr=subprocess.PIPE, **TEXT)
+        for line in proc.stderr:
+            line = line.rstrip("\r\n")
+            if line == "new_parse":
+                i += 1
+            elif line.startswith(_DROPPED) and 0 <= i < len(batch):
+                found.append((("dropped", "-"), batch[i]))
+            else:
+                m = _DECISION.match(line)
+                if m and 0 <= i < len(batch):
+                    found.append(((m["how"], m["sym"]), batch[i]))
+        proc.wait()
+        if i + 1 != len(batch):
+            raise SystemExit(f"debug log names {i + 1} parse(s) for "
+                             f"{len(batch)} file(s); check the CLI version")
+        return found
+
+    batches = [files[i:i + args.batch] for i in range(0, len(files), args.batch)]
+    out = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        for found in pool.map(one_batch, batches):
+            for key, path in found:
+                out.setdefault(key, []).append(path)
+    return out
+
+
+def explain_declarations(cli, grammar, selected, declared, tmp):
+    """Print what each selected declaration resolves; return the findings.
+
+    The unmodified grammar is generated first: if it does not build with this
+    CLI, every declaration would be "explained" by the same unrelated
+    conflict. It lands in `tmp/base`, which the measurements reuse.
+    """
+    error = generate_summary(cli, grammar, os.path.join(tmp, "base"))
+    if error:
+        raise SystemExit("src/grammar.json does not generate with this CLI, so "
+                         "nothing below would mean anything. Regenerate with "
+                         "the repository's own CLI, or name the right one with "
+                         f"--cli:\n{json.dumps(error)[:300]}")
+    findings, seen = 0, set()
+    for k, conflict in enumerate(selected):
+        key = tuple(sorted(conflict))
+        print(f"\n[{', '.join(conflict)}]")
+        if key in seen:
+            findings += 1
+            print("     DUPLICATE: the same rules are declared above. "
+                  "Remove this one.")
+            continue
+        seen.add(key)
+        without = dict(grammar)
+        without["conflicts"] = [c for c in declared if tuple(sorted(c)) != key]
+        error = generate_summary(cli, without, os.path.join(tmp, f"without-{k}"))
+        if not error:
+            findings += 1
+            print("     UNNECESSARY: the grammar generates without it. "
+                  "Remove it, or find the conflict it was meant for.")
+            continue
+        for line in explain_conflict(error):
+            print(f"     {line}")
+    print("\nEach is the first state that needs the declaration; it may "
+          "cover others.")
+    return findings
+
+
+def report_runtime(base_cmd, inputs, label, args):
+    decisions = runtime_decisions(base_cmd, inputs, args)
+    print("\nchoices between complete readings, by what decided them"
+          + (" -- the whole grammar, not only the selected conflicts:"
+             if args.only else ":"))
+    if not decisions:
+        print("  none logged: on these inputs no two complete readings "
+              "met. Versions dropped at the cap mostly leave no line.")
+    by_kind = {}
+    for (how, sym), paths in decisions.items():
+        by_kind.setdefault(how, []).append((sym, paths))
+    for how in ("select_higher_precedence", "select_earlier",
+                "select_existing", "dropped"):
+        rows = sorted(by_kind.get(how, []), key=lambda r: -len(r[1]))
+        if not rows:
+            continue
+        total = sum(len(p) for _s, p in rows)
+        where = {p for _s, ps in rows for p in ps}
+        print(f"  {DECIDED_BY[how]}: {total} in {len(where)} input(s)")
+        for sym, paths in rows[:MAX_MODES]:
+            print(f"    {len(paths):6d}  {sym:40s} e.g. {label(paths[0])}")
+
+
+def report_flip(cli, grammar, repo, selected, lang, base_cmd, inputs, cases,
+                label, args, tmp):
+    """Favour each side in turn; print what moves; return the findings."""
+    how_by_path = {p: how for p, (_label, how) in cases.items()}
+
+    def pins(cmd):
+        return {path: entry for path, entry in
+                map_files(repo, cmd, inputs, args, pin_file, how_by_path)}
+
+    base = pins(base_cmd)
+    # The weight goes on a rule, not on a declaration, so a rule in two
+    # conflicts is one variant, built and reported once.
+    rules = []
+    for c in selected:
+        rules.extend(r for r in c
+                     if r in grammar.get("rules", {}) and r not in rules)
+    libs = {}
+    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
+        futures = {r: pool.submit(build_variant, cli, favoured(grammar, r), repo,
+                                  os.path.join(tmp, f"flip-{i}"))
+                   for i, r in enumerate(rules)}
+        for rule, fut in futures.items():
+            libs[rule] = fut.result()
+    print(f"\nflip: each side favoured by dynamic precedence {FLIP_WEIGHT}, "
+          "against the same grammar unweighted")
+    findings, reported = 0, {}
+    for conflict in selected:
+        print(f"\n[{', '.join(conflict)}]")
+        for rule in conflict:
+            if rule not in libs:
+                continue
+            if rule in reported:
+                print(f"     favour {rule}: as under "
+                      f"[{', '.join(reported[rule])}] above")
+                continue
+            reported[rule] = conflict
+            after = pins(cli + ["parse", "--lib-path", libs[rule],
+                                "--lang-name", lang])
+            moved = [p for p in inputs if after.get(p) != base.get(p)]
+            pinned = [cases[p][0] for p in moved if p in cases]
+            loose = [p for p in moved if p not in cases]
+            if not moved:
+                print(f"     favour {rule}: no named node moves")
+                continue
+            verdict = (f"pinned by {len(pinned)} corpus case(s)"
+                       if pinned else "UNPINNED: no corpus case would fail")
+            if not pinned:
+                findings += 1
+            print(f"     favour {rule}: {len(loose)} example file(s) move; "
+                  f"{verdict}")
+            for name in (pinned or [label(p) for p in loose])[:args.show]:
+                print(f"       {name}")
+    print("\nA side that moves trees is a choice the runtime makes on real "
+          "input. Favouring a rule weights every ambiguity it takes part in, "
+          "so read a moved file before blaming this conflict. A side that "
+          "moves nothing may still be a genuine ambiguity whose readings "
+          "differ only in hidden nodes or anonymous tokens; --runtime shows it.")
+    return findings
+
+
+def cmd_conflicts(args):
+    """Explain each declared conflict, and measure what it decides.
+
+    A declared conflict says the language is ambiguous here for one token of
+    lookahead. Whether that is right is a question about what the runtime
+    then does with it, and that is measurable: which conflict `generate`
+    reports without the declaration, whether any input leaves two complete
+    readings to choose between (`--runtime`), and whether that choice changes
+    a tree that no corpus case pins (`--flip`).
+    """
+    spec = load_spec(args.spec) if args.spec else None
+    repo = os.path.abspath(args.repo)
+    grammar = load_grammar_json(repo)
+    if args.cli:
+        # Generation runs in a scratch directory, so a relative path would
+        # point somewhere else there; which() also finds Windows .cmd shims.
+        cli = [os.path.abspath(shutil.which(args.cli) or args.cli)]
+    else:
+        cli = resolve_cli(spec or {}, repo)
+    version = _run(cli + ["--version"], repo)
+    if not version:
+        raise SystemExit(
+            f"no working tree-sitter CLI for {repo} ({' '.join(cli)}). Install "
+            "the repository's own with `npm ci` -- ask first -- or name one "
+            "with --cli and record which.")
+    lang = (spec or {}).get("language") or grammar.get("name")
+    print(f"CLI: {' '.join(cli)} ({version})")
+    declared = [list(c) for c in grammar.get("conflicts", [])]
+    selected = [c for c in declared
+                if not args.only or any(r in args.only for r in c)]
+    print(f"{len(declared)} declared conflict(s) in src/grammar.json"
+          + (f"; {len(selected)} selected" if args.only else ""))
+    if args.only and not selected:
+        raise SystemExit(f"no declared conflict names {', '.join(args.only)}")
+    if not selected:
+        return 0
+
+    with tempfile.TemporaryDirectory(prefix="probe-conflicts-") as tmp:
+        findings = explain_declarations(cli, grammar, selected, declared, tmp)
+        if not (args.runtime or args.flip):
+            return 1 if findings else 0
+
+        files = example_inputs(repo, spec, args)
+        cases = corpus_inputs(repo, spec or {}, os.path.join(tmp, "corpus"),
+                              lang)
+        inputs = files + list(cases)
+        print(f"\ninputs: {len(files)} example file(s), {len(cases)} corpus "
+              "case(s)")
+        if not inputs:
+            raise SystemExit("NOTHING WAS PARSED: no example matched and no "
+                             "corpus case is usable. Pass --files, or fix the "
+                             "spec's globs; this is not a clean result.")
+        base_lib = build_variant(cli, grammar, repo, os.path.join(tmp, "base"),
+                                 generated=True)
+        base_cmd = cli + ["parse", "--lib-path", base_lib, "--lang-name", lang]
+
+        def label(path):
+            return cases[path][0] if path in cases else os.path.relpath(path, repo)
+
+        if args.runtime:
+            report_runtime(base_cmd, inputs, label, args)
+        if args.flip:
+            findings += report_flip(cli, grammar, repo, selected, lang, base_cmd,
+                                    inputs, cases, label, args, tmp)
+    return 1 if findings else 0
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -1569,6 +2008,32 @@ def main(argv=None):
     common(p)
     p.add_argument("--out", required=True)
     p.set_defaults(func=cmd_census)
+
+    p = sub.add_parser(
+        "conflicts",
+        help="explain each declared conflict; measure what it decides")
+    p.add_argument("--repo", required=True, help="grammar repository root")
+    p.add_argument("--spec", help="invariant spec JSON, for its files and CLI")
+    p.add_argument("--cli", help="a tree-sitter binary, when the repository "
+                                 "has none installed; the report names it")
+    p.add_argument("--only", action="append", default=[], metavar="RULE",
+                   help="only conflicts that name this rule (repeatable)")
+    p.add_argument("--runtime", action="store_true",
+                   help="count the choices between complete readings the "
+                        "runtime makes on the inputs, by what decided them")
+    p.add_argument("--flip", action="store_true",
+                   help="favour each side in turn; report trees that move and "
+                        "whether a corpus case pins them")
+    p.add_argument("--files", nargs="*",
+                   help="example inputs (default: the spec's globs, else "
+                        "examples/ by tree-sitter.json file types)")
+    p.add_argument("--batch", type=int, default=60,
+                   help="files per CLI invocation (default 60)")
+    p.add_argument("--jobs", type=int, default=os.cpu_count() or 1,
+                   help="processes to run at once (default: one per CPU)")
+    p.add_argument("--show", type=int, default=3,
+                   help="inputs to list per moved side")
+    p.set_defaults(func=cmd_conflicts)
 
     p = sub.add_parser("diff", help="diff two censuses, or two skeleton runs")
     p.add_argument("before")
