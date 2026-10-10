@@ -14,7 +14,8 @@ simply does nothing.
 | `token(prec(N, …))` | lexing | one token must win over another that matches the same text |
 | `prec(N, …)` | parser generation | a static shift/reduce or reduce/reduce tie |
 | `prec.left` / `prec.right` | parser generation | associativity; **also silently settles a repeat's continue-versus-stop** |
-| `prec.dynamic(N, …)` + `conflicts` | runtime, GLR only | two complete parses are both valid and one must be chosen |
+| `conflicts` | parser generation keeps both actions; the runtime forks | the right reading depends on more than one token of lookahead |
+| `prec.dynamic(N, …)` | runtime, only inside a declared conflict | two complete readings both survive and one must be chosen |
 
 ### The rule that costs the most time
 
@@ -52,22 +53,111 @@ So:
 
 ```bash
 npx tree-sitter generate --report-states-for-rule <rule>   # states for one rule
-npx tree-sitter parse -d FILE                              # parse decision log
-npx tree-sitter parse -D FILE                              # log.html with graphs
-npx tree-sitter parse --open-log -D FILE                   # and open it
+npx tree-sitter generate --report-states-for-rule -        # state count per rule
+npx tree-sitter parse FILE -d                              # parse decision log
+npx tree-sitter parse FILE -D                              # log.html with graphs
+npx tree-sitter parse FILE --open-log -D                   # and open it
 ```
+
+Put `-d` **after** the file. In CLI 0.26 and 0.27 it takes an optional value, so
+`parse -d FILE` reads the file name as the debug mode and fails.
 
 The fastest route to the real conflict is usually to **remove** the associativity
 that is hiding it and read the unresolved-conflict error `generate` then prints: it
 names the exact symbol sequence and the two interpretations, which is the thing you
 were guessing at.
 
+## Conflicts are a modelling decision
+
+The [official guide][conflicts] puts it plainly: "Sometimes, conflicts are actually
+desirable." When `generate` stops on an unresolved conflict it lists the resolutions
+it accepts — a precedence, an associativity, or *add a conflict for these rules* —
+and the third is not the lesser one. Real languages are locally ambiguous: MLIR
+cannot tell `!foo` a type alias from a dialect namespace until it sees what follows.
+Forcing such a construct through a static precedence picks a reading before the
+evidence arrives. The pick is silent, and it is wrong on every input that needed the
+other reading.
+
+[conflicts]: https://tree-sitter.github.io/tree-sitter/creating-parsers/3-writing-the-grammar.html#using-conflicts
+
+### What a declaration buys, and what it costs
+
+A declared conflict tells the generator to keep every action in that state. At
+runtime the parser forks and carries each reading forward. Each fork then meets one
+of three fates:
+
+| Fate | What happens | Cost |
+| --- | --- | --- |
+| **Local ambiguity** | later tokens kill every fork but one, so one complete parse exists | parse time and table states; nobody has to choose |
+| **Genuine ambiguity** | two forks complete the same span and merge; the runtime keeps one | a choice — and someone has to have made it |
+| **Version cap** | more than six forks are alive; the least promising are dropped, mostly without a log line | the right reading can vanish with no ERROR |
+
+The runtime keeps one reading of a genuine ambiguity by these rules, in order
+(`ts_parser__select_tree` in [`lib/src/parser.c`][parser.c]):
+
+1. the lower error cost;
+2. then the higher total dynamic precedence;
+3. then a structural comparison of the two subtrees: symbol, then child count,
+   then each child in turn. The symbols compare by the numbers the generator
+   assigns, and those move when rules are reordered. When everything compares
+   equal, the log says `select_existing` and the reading reached first is kept.
+   The comparison ignores aliases and field names, so the two can still differ
+   there.
+
+The third rule is not a decision anybody wrote down. In tree-sitter-tablegen,
+`foreach i = 1 in` has two complete readings, `range_piece` and `_simple_value`,
+and no dynamic precedence: it parses as `integer_literal`. Move the `range_piece`
+rule above `_simple_value` in the grammar, change nothing else, and it parses as
+`range_piece`. **A refactor that only reorders rules changes trees.**
+
+The cap is `MAX_VERSION_COUNT`, 6, in the same file. Most drops happen when the
+stack is condensed, which logs only a generic `condense` line. The one specific line,
+`aborting reduce with too many versions`, appears for some reduce-time drops and not
+others. So a log without it is not evidence that nothing was dropped. A conflict that
+forks once for each element of a list is the shape that reaches the cap.
+
+[parser.c]: https://github.com/tree-sitter/tree-sitter/blob/v0.27.0/lib/src/parser.c
+
+### Choosing a resolution
+
+Read the conflict first. `generate`'s error names the symbol sequence, the lookahead
+and each interpretation; `probe.py conflicts` prints the same for a declaration
+already in place. Then take the first rung that holds:
+
+1. **The grammar invented the ambiguity.** Two rules describe the same text and
+   give a consumer no structure it could use. Merge them, or hide one — the guide's
+   "Structuring Rules Well". This removes the conflict instead of managing it.
+2. **One reading is right whenever this lookahead token appears.** Use a static
+   `prec` or associativity, as `generate` offers. It is the cheapest rung — no fork,
+   no runtime cost — and the final one: the table never revisits it. Check the
+   readings it rules out against real input before trusting it:
+   `probe.py conflicts --static` tries each resolution `generate` offers in place
+   of a declaration and lists what moves. `prec.right` on a repeat is this rung
+   taken by accident.
+3. **The right reading depends on tokens further ahead.** Declare the conflict.
+   If the forks are local, that is all it needs: later tokens decide.
+4. **Both readings can complete.** Declare the conflict *and* say which reading
+   wins: a `prec.dynamic` on a rule that appears in one reading and not the other,
+   and corpus cases that pin the winner. The defect is a genuine ambiguity left to
+   symbol order, not the conflict itself. If both readings give the same tree,
+   no corpus case can pin either: you are on rung 1.
+5. **The weighted choice fails fuzz, or has to end a construct at a boundary.**
+   Decide it in the lexer — the next section. The docs present external scanners
+   as the tool for what lexical rules, parsing and dynamic precedence cannot
+   handle. This is the last rung, not the first.
+
+**When the ladder and the request disagree.** A user who asks for a conflict may be
+on rung 1, and one who asks for a precedence may be on rung 4. The request is
+theirs; the ladder is evidence. Measure both — the rung asked for and the rung the
+ladder points to, with `--static`, `--flip` and a census — and let the user choose.
+Doing either one silently is the wrong outcome.
+
 ### When a full parse is right and an incremental one is not
 
 A `prec.dynamic` decision is made between two complete readings. Incremental
 re-parse reuses subtrees and does not reliably make it again, so a weighting that
-fixes every whole-file test can still fail fuzz. Stop tuning the weight and move the
-decision into the lexer, where nothing is left to weigh:
+fixes every whole-file test can still fail fuzz. When it does, stop tuning the
+weight and move the decision into the lexer, where nothing is left to weigh:
 
 - Emit an external token the permissive rule cannot consume. The scanner's
   `valid_symbols` include tokens that are only valid after a reduction, so returning
@@ -105,7 +195,92 @@ seed. An external token for a line-start `%x … = <operation name>` passed it (
 for unbound generic operations (#75) caught that, and fixed both with the sigil
 pattern above and one `:cst` case.
 
+### Measuring what a conflict decides
+
+```bash
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC"
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --only RULE --flip
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --static
+```
+
+With no flags it explains each declaration: the conflict `generate` reports without
+it, with its symbol sequence, lookahead, interpretations and the static resolutions
+`generate` would accept. A declaration the grammar generates without is
+unnecessary, and the command exits 1. It reads `src/grammar.json` and generates
+into a temporary directory, so no JavaScript runs and the repository is untouched.
+The spec is optional; without one, inputs default to `examples/` by the file types
+in `tree-sitter.json`, and `--cli` names a binary when the repository has none.
+
+- **`--runtime`** parses the examples and every corpus input with `-d`, and counts
+  the choices the runtime made between complete readings, by what decided them:
+  dynamic precedence, symbol order, or stack order (readings equal by symbol). It
+  also counts the version-cap line, as a lower bound. Rows are named after the
+  node being reduced where the readings merged — usually a parent of the
+  conflict's rules, not one of them. The count covers the whole grammar even
+  with `--only`, because a log line does not name the declaration behind it. It
+  is a lower bound: when two equivalent readings link the same stack nodes,
+  `stack_node_add_link` in `lib/src/stack.c` keeps one and logs nothing.
+- **`--flip`** favours each side of each conflict in turn with a large dynamic
+  precedence, rebuilds, and lists the inputs whose named nodes move, and whether
+  a corpus case would then fail — compared as `tree-sitter test` compares, so a
+  span-only move or an `:error` case pins nothing. A side that moves nothing is
+  local on these inputs *or* genuine with readings that differ only in hidden
+  nodes and anonymous tokens; `--runtime` tells which. A side that moves only
+  examples is a choice the runtime makes on real input that nothing pins — a
+  lead, and exit 1. Favouring a
+  rule weights every ambiguity it takes part in, so a rule in two declarations is
+  flipped once and reported under the first. Read one moved file before
+  attributing it to a conflict. `:skip` cases do not count as pinning.
+- **`--static`** removes each needed declaration in turn and puts each static
+  resolution `generate` offered in its place — `prec` on one side, or `prec.left`
+  / `prec.right` — then reports whether the grammar generates and which inputs
+  move. `REPLACEABLE` means no named node moves on these inputs: rung 2 holds
+  there. A variant that moves inputs can still be the fix, when every move goes to
+  the right reading. It reports leads, never a finding.
+
+They measure only the inputs given. A conflict that is quiet on every one of them
+can still be genuine: turn the symbol sequence into an input and parse it with `-d`.
+tablegen's `'foreach' identifier '=' integer_literal • 'in'` became
+`foreach i = 1 in def A;`, which no example or corpus case contained.
+
+Watch for one text read two ways. When the same spelling parses as different nodes
+depending on what follows it, a genuine ambiguity is being settled by stack order,
+and no tool here will name it: the merge happens in `stack_node_add_link`, which
+logs nothing. In tree-sitter-mlir, `test.op !foo<i32>` alone is a `dialect_type`;
+with another operation after it, a `type_alias` — and one corpus case recorded both
+as expected. Parse the construct alone and with a sibling after it.
+
+### Recording an accepted conflict
+
+Real ambiguity is not a reason to refuse a conflict, and a conflict is not exempt
+from evidence. This record makes a new declaration an ordinary, reviewable change.
+Put a short form in the contract's conflict table and the whole of it in the commit
+or PR:
+
+| Field | Where it comes from |
+| --- | --- |
+| The rules, and the conflict `generate` reports without the declaration | `probe.py conflicts --only RULE` |
+| Its fate — local or genuine — and on which inputs | `--runtime`, `--flip`, and an input built from the symbol sequence |
+| For a genuine one: the `prec.dynamic` that decides it, and the corpus cases that pin the winner | the grammar, `test/corpus` |
+| The rungs above it, and why each failed — with a number where there is one | the attempt itself. tree-sitter-mlir's `array` and `tensor` rows are the model: token precedence was tried and grew the parser without improving the tree |
+| Cost: `src/parser.c` size, `STATE_COUNT`, parse throughput, before and after | `SKILL.md` Part 5 |
+| Fuzz, for a genuine one | the repository's fuzz gate |
+
+A declaration with this record is a modelling decision. One without it is what a
+reviewer is right to refuse, and it will be the one nobody dares remove later.
+
 ## Seeing what the tree actually contains
+
+**Parse with this checkout's parser.** `tree-sitter parse` picks a grammar by file
+extension among all it knows, other checkouts in its config included: in a worktree
+it parsed with the main checkout's grammar despite `--grammar-path` and its own
+`TREE_SITTER_LIBDIR`. `probe.py` builds and loads the checkout's own; by hand, run
+`tree-sitter build -o LIB`, then `parse --lib-path LIB --lang-name NAME`.
+`tree-sitter test` and fuzz do compile the current directory, but into a cache
+keyed by grammar name, and they rebuild only when `src/` is newer than the cached
+library. A second checkout's build can therefore serve the first. Give every
+checkout other than the main one its own `TREE_SITTER_LIBDIR=$(mktemp -d)`.
 
 The default S-expression shows **named nodes only**. Anonymous tokens — the `=`, the
 `,`, the punctuation a loose fallback absorbed — are invisible. When a span looks too
@@ -226,11 +401,19 @@ version and will age:
   <https://tree-sitter.github.io/tree-sitter/creating-parsers/3-writing-the-grammar.html>
 - Writing tests — corpus format and attributes:
   <https://tree-sitter.github.io/tree-sitter/creating-parsers/5-writing-tests.html>
+- External scanners — when to reach for one, and the error-recovery call with every
+  token valid:
+  <https://tree-sitter.github.io/tree-sitter/creating-parsers/4-external-scanners.html>
+- How the runtime chooses between complete readings, and the version cap —
+  `ts_parser__select_tree`, `ts_parser__condense_stack`, `MAX_VERSION_COUNT`; the
+  docs do not describe either:
+  <https://github.com/tree-sitter/tree-sitter/blob/v0.27.0/lib/src/parser.c>
 - The CLI's own help is the authority on flags, which move between releases:
   `npx tree-sitter parse --help`, `test --help`, `generate --help`, `fuzz --help`
 
 Tree-sitter's documentation does not describe every behaviour that matters — the
 interaction between `prec.right` on a `repeat` and a permissive body rule is not
-written down anywhere, and was established here by experiment. Where this file
-states something the docs do not, treat it as a finding reproduced in this
-repository rather than as an upstream guarantee.
+written down anywhere, and neither is the symbol-order tie-break; both were
+established here by experiment. Where this file states something the docs do not,
+treat it as a finding reproduced in this repository rather than as an upstream
+guarantee.

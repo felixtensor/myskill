@@ -88,7 +88,8 @@ then add the two lines it cannot measure:
 
 | Claim | Verified | Result |
 | --- | --- | --- |
-| declared conflict count | yes/no | <n>, matches / corrected |
+| declared conflicts — count, each needed | yes/no | <n>, matches / corrected; unnecessary: <list or none> |
+| leads from `conflicts --flip` (unpinned sides) | yes/no | <n>, each triaged per Part 4 like any other lead |
 | scanner token kinds and state | yes/no | … |
 | public AST surface names exist | yes/no | … |
 | query files and status table | yes/no | … |
