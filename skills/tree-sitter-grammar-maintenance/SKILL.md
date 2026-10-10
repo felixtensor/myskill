@@ -22,7 +22,7 @@ general-purpose parser rots into a pile of dialect-specific special cases. The
 architecture document exists to stop exactly that, and it only works if it is
 maintained as a contract rather than as prose that trails the code.
 
-## Three ways in
+## Two ways in
 
 **A test is failing, or you changed the grammar and tests broke.** Read the actual
 tree before editing anything: the question is never "how do I make this green" but
@@ -160,13 +160,11 @@ Expect them to be green. That is the point: the audit starts where the gates sto
 # Part 1 · What counts as evidence
 
 There is no node-for-node oracle: a compiler's in-memory IR is what remains *after*
-parsing, so it has no correspondence with a CST, and mapping one onto the other means
-writing a second interpreter that then needs verifying itself — a known dead end,
-which left repositories that tried it with a ledger nobody could finish reviewing.
-**But there is a skeleton oracle.** Normalize the input with the reference parser and
-parse *its output* with the same grammar: both sides are then CSTs from the same
-parser, the mapping is the identity, and the reference side carries the language's
-own answer about the program's structure.
+parsing, and mapping it onto a CST means a second interpreter that itself needs
+verifying — a dead end that left a ledger nobody could finish reviewing. **But there
+is a skeleton oracle.** Normalize the input with the reference parser and parse *its
+output* with the same grammar: both sides are CSTs from one parser, the mapping is
+the identity, and the reference side carries the language's own answer.
 
 Five lines of evidence follow, each with its own job. Do not treat them as one
 checklist — confusing them is how false confidence forms. In the order to reach for
@@ -455,22 +453,16 @@ repository, and editing them destroys the only reason they are evidence.
 
 # Part 7 · Keep a local audit record
 
-Keep it in the parser repository's main checkout but **outside version control**, a
-local working note rather than a repository asset or a release gate. Pick a
-directory the repository already ignores and confirm it (`git check-ignore -v tmp/`);
-if nothing is ignored, ask the maintainer. Use `assets/audit-log-template.md`.
+Keep it in the parser repository's main checkout but **outside version control**:
+pick a directory the repository already ignores and confirm it
+(`git check-ignore -v tmp/`); if nothing is ignored, ask the maintainer.
+`assets/audit-log-template.md` gives the shape — a current state rewritten every
+pass, reference parser path included, then one appended entry per pass with its
+`provenance` lines and a status for each finding.
 
-The **current state** at the top is rewritten every pass: open findings, accepted
-trade-offs with their reasons, clean invariants, what is not covered yet, the
-reference parser's absolute path. Below it, one entry per pass is appended and never
-rewritten: the `provenance` lines, what ran and what did not, and one line per
-finding with a status — `open`, `fixed in <commit>`, `accepted`, or `out of scope`.
-
-**The reason attached to an `accepted` or `out of scope` row is the whole point** —
-a status with no reason gets rediscovered and re-argued. And the record must never
-become a per-file classification, a tree manifest, hashes, a coverage score or a
-release gate: those were built once and removed, because they reduced no judgement
-and made ordinary fixes wait on a data platform. One row per decision.
+**The reason attached to an `accepted` or `out of scope` row is the whole point**:
+a status without one gets re-argued. One row per decision, never one per file — and
+never a manifest, a coverage score or a release gate (Part 9).
 
 ---
 
@@ -491,10 +483,10 @@ becomes acceptable is not, and is not yours to do.
 
 # Part 9 · Boundaries
 
-No persistent ledger or AST manifest, no per-file notarization of the examples, no
-resident reference oracle or CST-to-IR mapping, no permanent tooling or baseline in
-the parser repository, no principle amended to land a change, no grammar change
-without a hand-written corpus case, no dedicated rule for coverage alone —
-`references/boundaries.md` gives each refusal its reason and a bounded alternative.
-If an audit keeps demanding more infrastructure, it is scoped wrong: narrow it to one
-construct, one invariant, one reproducer.
+No ledger or AST manifest, no per-file notarization of the examples, no resident
+oracle or CST-to-IR mapping, no permanent tooling or baseline in the parser
+repository, no principle amended to land a change, no grammar change without a
+hand-written corpus case, no dedicated rule for coverage alone:
+`references/boundaries.md` gives each its reason. An audit that keeps demanding
+infrastructure is scoped wrong; narrow it to one construct, one invariant, one
+reproducer.
