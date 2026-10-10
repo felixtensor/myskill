@@ -157,44 +157,42 @@ is indistinguishable from a wrong one.
 
 ## The declared conflicts, measured
 
-`probe.py conflicts --runtime --flip` on `main` @ `dff9e35`, 2026-10-10, CLI 0.27.0:
-617 examples and 203 corpus cases, 70 seconds.
+`probe.py conflicts --runtime --flip --static` on `main` @ `dff9e35`, 2026-10-10,
+CLI 0.27.0: 617 examples and 203 corpus cases, about two minutes. Filed as
+felixtensor/tree-sitter-mlir #82–#85.
 
-- **All 11 are needed**: `generate` fails without any one of them. Its symbol
-  sequences name the overlaps in the contract's table, but that does not make each
-  stated cause complete — a same-day pass found rows 1–3 hold only outside custom
-  bodies (`references/validation.md` §8).
-- **Only `_value_use_list × _value_use_and_type` moves no named node either
-  way** — and it is not local. `^bb1(%a : i32)` completes both as the bulk and as
-  the per-pair list inside `_value_arg_list`, and symbol order picks one: the 156
-  `_value_arg_list` choices below. Both readings give the same tree, so the
-  choice is invisible — which makes it rung 1 of the ladder (two hidden rules for
-  one text), not a reason to keep the declaration. Each of the other ten has a
-  rule that moves example trees when favoured. The weight is on the rule, though, and
-  `custom_op_name`, `dialect_namespace` and `attribute_entry` each sit in two
-  declarations, so a move is not proof that this declaration chose it.
-- **The runtime logged 2,610 such choices** — a lower bound: 1,005 in 116 inputs
-  by dynamic precedence, almost all under `_affine_for_operation_repeat1`, which
-  despite its name is the repeat every custom-op body shares; 1,605 in 160 inputs
-  by symbol order,
-  mostly inside custom-body groups (`_custom_body_paren`,
-  `_custom_body_brace_group_repeat1`). A symbol-order choice whose readings give the
-  same named tree is harmless. `--flip` finds the ones that do not.
-- **Five favoured rules move examples that no corpus case pins.** These are leads,
-  not verdicts: each is a corpus case to add, or a finding.
+- **All 11 are needed**: `generate` fails without any one of them. Their symbol
+  sequences name the overlaps in the contract's table, but rows 1–3 ("before the
+  following body decides") hold only outside custom bodies.
+- **The runtime logged 2,610 choices between complete readings** — a lower bound:
+  1,005 in 116 inputs by dynamic precedence, almost all under
+  `_affine_for_operation_repeat1`, which despite its name is the repeat every
+  custom-op body shares; 1,605 in 160 inputs by symbol order, mostly inside
+  custom-body groups (`_custom_body_paren`, `_custom_body_brace_group_repeat1`).
+- **`_value_use_list × _value_use_and_type` is genuine but invisible.**
+  `^bb1(%a : i32)` completes both as the bulk and as the per-pair list inside
+  `_value_arg_list` — the 156 `_value_arg_list` choices above — and both give the
+  same tree. That is rung 1 (two hidden rules for one text), not a reason to keep
+  the declaration.
+- **Three declarations are replaceable** by the static resolution `generate`
+  offers, with no named node moving: that one (`prec` on `_value_use_list`),
+  `_type_list_no_parens × _type_or_func_type` and `_custom_body_tensor_keyword ×
+  tensor_type` (#85).
+- **Two choices are wrong, and a static `prec` fixes each** with no other move:
+  `{function_type = () -> ()}` loses its `function_type` (`prec` on
+  `_type_list_parens`, #83); and inside a custom body `!ns<...>` is a
+  `dialect_type` alone but a `type_alias` plus loose tokens when something follows
+  (`prec` on `dialect_namespace`, #82). The corpus case *Unknown dialect type
+  without dot-qualified mnemonic* expects both readings of the same `!bar<>`.
+- **Four right readings no corpus case pins** (#84): favouring the other side
+  moves them and `tree-sitter test` stays green.
 
-| Favoured side | Examples moved | What moves | Current reading |
-| --- | --- | --- | --- |
-| `_type_list_parens` | 3 | `function_type = () -> ()` in an attribute dictionary gains a `function_type` (`GPU/ops.mlir:532`, `Builtin/Bytecode/types.mlir:90`) | **loses structure — a lead** |
-| `_type_list_no_parens` | 1 | `#gpu.object<#nvvm.target, properties = {…}, …>` ends early | right, unpinned |
-| `_multi_dim_affine_expr_parens` | 1 | a sparse `tensor<…, #sparse_tensor.encoding<{ map = (d0) -> … }>>` breaks | right, unpinned |
-| `attribute_entry` (both of its conflicts) | 4 | `#nvvm.target<…, flags = {fast, ftz}>` ends early | right, unpinned |
-| `_custom_body_array_keyword` | 15 | `values = array<i64: 1, 2>` loses its `array_literal` | right, unpinned |
-
-One more lead `--flip` cannot attribute and `--runtime` does not log: inside a
-custom body, `test.op !foo<i32>` alone parses as a `dialect_type`, and followed by
-another operation as a `type_alias` plus loose tokens. The two readings merge in
-`stack_node_add_link`, which keeps one without a log line.
+| Favoured side | Examples moved | What moves |
+| --- | --- | --- |
+| `_type_list_no_parens` | 1 | `#gpu.object<#nvvm.target, properties = {…}, …>` ends early |
+| `_multi_dim_affine_expr_parens` | 1 | a sparse `tensor<…, #sparse_tensor.encoding<{ map = (d0) -> … }>>` breaks |
+| `attribute_entry` (both of its conflicts) | 4 | `#nvvm.target<…, flags = {fast, ftz}>` ends early |
+| `_custom_body_array_keyword` | 15 | `values = array<i64: 1, 2>` loses its `array_literal` |
 
 A right but unpinned reading is protected only by symbol order and by today's
 dynamic precedences. A refactor that reorders rules, or a weight added for an

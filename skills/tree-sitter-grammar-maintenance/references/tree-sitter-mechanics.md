@@ -130,8 +130,10 @@ already in place. Then take the first rung that holds:
 2. **One reading is right whenever this lookahead token appears.** Use a static
    `prec` or associativity, as `generate` offers. It is the cheapest rung — no fork,
    no runtime cost — and the final one: the table never revisits it. Check the
-   readings it rules out against real input with a census before trusting it.
-   `prec.right` on a repeat is this rung taken by accident.
+   readings it rules out against real input before trusting it:
+   `probe.py conflicts --static` tries each resolution `generate` offers in place
+   of a declaration and lists what moves. `prec.right` on a repeat is this rung
+   taken by accident.
 3. **The right reading depends on tokens further ahead.** Declare the conflict.
    If the forks are local, that is all it needs: later tokens decide.
 4. **Both readings can complete.** Declare the conflict *and* say which reading
@@ -143,6 +145,12 @@ already in place. Then take the first rung that holds:
    Decide it in the lexer — the next section. The docs present external scanners
    as the tool for what lexical rules, parsing and dynamic precedence cannot
    handle. This is the last rung, not the first.
+
+**When the ladder and the request disagree.** A user who asks for a conflict may be
+on rung 1, and one who asks for a precedence may be on rung 4. The request is
+theirs; the ladder is evidence. Measure both — the rung asked for and the rung the
+ladder points to, with `--static`, `--flip` and a census — and let the user choose.
+Doing either one silently is the wrong outcome.
 
 ### When a full parse is right and an incremental one is not
 
@@ -193,6 +201,7 @@ pattern above and one `:cst` case.
 python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC"
 python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip
 python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --only RULE --flip
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --static
 ```
 
 With no flags it explains each declaration: the conflict `generate` reports without
@@ -223,11 +232,24 @@ in `tree-sitter.json`, and `--cli` names a binary when the repository has none.
   rule weights every ambiguity it takes part in, so a rule in two declarations is
   flipped once and reported under the first. Read one moved file before
   attributing it to a conflict. `:skip` cases do not count as pinning.
+- **`--static`** removes each needed declaration in turn and puts each static
+  resolution `generate` offered in its place — `prec` on one side, or `prec.left`
+  / `prec.right` — then reports whether the grammar generates and which inputs
+  move. `REPLACEABLE` means no named node moves on these inputs: rung 2 holds
+  there. A variant that moves inputs can still be the fix, when every move goes to
+  the right reading. It reports leads, never a finding.
 
-Both measure only the inputs given. A conflict that is quiet on every one of them
+They measure only the inputs given. A conflict that is quiet on every one of them
 can still be genuine: turn the symbol sequence into an input and parse it with `-d`.
 tablegen's `'foreach' identifier '=' integer_literal • 'in'` became
 `foreach i = 1 in def A;`, which no example or corpus case contained.
+
+Watch for one text read two ways. When the same spelling parses as different nodes
+depending on what follows it, a genuine ambiguity is being settled by stack order,
+and no tool here will name it: the merge happens in `stack_node_add_link`, which
+logs nothing. In tree-sitter-mlir, `test.op !foo<i32>` alone is a `dialect_type`;
+with another operation after it, a `type_alias` — and one corpus case recorded both
+as expected. Parse the construct alone and with a sibling after it.
 
 ### Recording an accepted conflict
 
@@ -255,6 +277,10 @@ extension among all it knows, other checkouts in its config included: in a workt
 it parsed with the main checkout's grammar despite `--grammar-path` and its own
 `TREE_SITTER_LIBDIR`. `probe.py` builds and loads the checkout's own; by hand, run
 `tree-sitter build -o LIB`, then `parse --lib-path LIB --lang-name NAME`.
+`tree-sitter test` and fuzz do compile the current directory, but into a cache
+keyed by grammar name, and they rebuild only when `src/` is newer than the cached
+library. A second checkout's build can therefore serve the first. Give every
+checkout other than the main one its own `TREE_SITTER_LIBDIR=$(mktemp -d)`.
 
 The default S-expression shows **named nodes only**. Anonymous tokens — the `=`, the
 `,`, the punctuation a loose fallback absorbed — are invisible. When a span looks too

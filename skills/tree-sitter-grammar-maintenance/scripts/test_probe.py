@@ -24,6 +24,7 @@ import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
+sys.dont_write_bytecode = True  # leave no __pycache__ inside the skill
 
 import probe  # noqa: E402
 
@@ -1130,10 +1131,13 @@ if args[0] == "generate":
     if "crash" in g["rules"]:
         sys.stderr.write("{{}}\\nthread 'main' panicked"); sys.exit(101)
     kept = [sorted(c) for c in g["conflicts"]]
+    static = {{n for n, r in g["rules"].items()
+              if r.get("type") in ("PREC", "PREC_LEFT", "PREC_RIGHT")}}
     error = None
-    if "broken" in g["rules"] or ["_simple_value", "range_piece"] not in kept:
+    if "broken" in g["rules"] or (["_simple_value", "range_piece"] not in kept
+                                  and not static & {{"_simple_value", "range_piece"}}):
         error = {RANGE_CONFLICT!r}
-    elif ["positional_arguments"] not in kept:
+    elif ["positional_arguments"] not in kept and "positional_arguments" not in static:
         error = {POSITIONAL_CONFLICT!r}
     diags = [{{"UnnecessaryConflicts": [["dead"]]}}] if ["dead"] in kept else []
     out = args[args.index("-o") + 1]
@@ -1157,7 +1161,7 @@ for a in rest:
     elif a != "-d":
         files.append(a)
 rules = json.load(open(lib))["rules"]
-leaf = "range_piece" if rules["range_piece"].get("type") == "PREC_DYNAMIC" \\
+leaf = "range_piece" if rules["range_piece"].get("type") in ("PREC_DYNAMIC", "PREC") \\
     else "integer_literal"
 LOGS = {{
     "WEIGHTED": "select_higher_precedence symbol:loop, prec:1, "
@@ -1331,6 +1335,17 @@ class Conflicts(unittest.TestCase):
                 os.chdir(cwd)
         self.assertEqual(status, 0, text)
         self.assertIn("reduce range_piece", text)
+
+    def test_static_tries_each_resolution_generate_offers(self):
+        status, text = self.conflicts("--static")
+        self.assertEqual(status, 1)  # the dead declaration, not a static lead
+        self.assertIn("prec(1000) on _simple_value: no named node moves -- "
+                      "REPLACEABLE", text)
+        self.assertIn("prec(1000) on range_piece: 1 example file(s) move; "
+                      "no corpus case would fail", text)
+        self.assertIn("prec.left on positional_arguments: no named node moves", text)
+        self.assertIn("prec.right on positional_arguments: no named node moves", text)
+        self.assertNotIn("[dead]\n     no static", text)  # unneeded: not tried
 
     def test_nothing_parsed_is_not_a_clean_flip(self):
         status, text = self.conflicts("--only", "range_piece", "--flip",

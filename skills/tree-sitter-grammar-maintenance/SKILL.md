@@ -129,10 +129,10 @@ numbers from a parser CI would not build are worthless, and each check has caugh
 real drift. Without a lock file, CI takes the newest CLI in the declared range, so
 name the version you measured with.
 
-On a mismatch, **ask before repairing** with `npm ci`, and rerun `provenance` after:
-npm may block the `tree-sitter-cli` install script and leave a package with no binary
-in it. The remaining repair is then the matching release binary in
-`node_modules/tree-sitter-cli/` — a download, so ask again.
+On a mismatch, **ask before repairing** with `npm ci`, then rerun `provenance`: npm
+may block the CLI's install script and leave no binary. The remaining repair, the
+matching release binary in `node_modules/tree-sitter-cli/`, is a download: ask
+again.
 
 **Then confirm the committed parser matches the grammar source:**
 
@@ -143,7 +143,10 @@ in it. The remaining repair is then the matching release binary in
 It prints nothing when the checked-in parser is current, and covers every generated
 file — `src/node-types.json`, where the public AST surface is checked, and anything
 a newer CLI adds. Any output means stale artifacts: measure on the regenerated
-parser, and say in the report that `src/` now differs from the commit.
+parser and say so. If `generate` fails, it has still rewritten `src/grammar.json`
+(`git checkout -- src/` restores it), and `tree-sitter test` keeps passing on the
+old parser: report that the working tree does not generate, and measure the
+committed one.
 
 **Record the baseline.** Run the repository's own gates and write down what they
 say, unchanged:
@@ -223,9 +226,8 @@ python3 scripts/probe.py skeleton --repo "$REPO" --spec "$SPEC" --tool "$TOOL" -
 `--limit N` compares N files spread evenly across the set. The command normalizes
 each input with the reference tool, parses that output with the same grammar, and
 compares quantities the printer preserves — for MLIR, the results each file binds
-(counted so that `%0:2` is two, because the printer regroups `%a, %b`), and the
-operation, region and block counts. Read it as a **ranked lead generator, not a
-gate**:
+(`%0:2` counts two, because the printer regroups `%a, %b`), and the operation,
+region and block counts. Read it as a **ranked lead generator, not a gate**:
 
 - **grammar above the reference** — always a defect, on any quantity: the grammar
   invented structure the language's parser does not see. Open these first.
@@ -245,9 +247,8 @@ skipped. A run that compared nothing exits 2; never report it as clean.
 python3 scripts/probe.py corpus --repo "$REPO" --spec "$SPEC"
 ```
 
-It compares each corpus case's input against that case's own expected tree. A case
-whose expected tree contradicts its input was accepted from `--update` without
-being read.
+It compares each case's input with its own expected tree; a case that contradicts
+its input was accepted from `--update` without being read.
 
 **Structural invariants over the example set:**
 
@@ -271,17 +272,17 @@ contract statement:
 Keep invariants few, narrow and high-precision. An invariant that fires on ordinary
 correct code is worse than no invariant, because it trains you to skim the output.
 
-**What each declared conflict decides.** A side whose flip moves examples but would
-fail no corpus test is a choice the runtime makes that nothing pins: a lead.
+**What each declared conflict decides.** A flip that moves examples but would fail no
+corpus test, and a declaration `--static` calls REPLACEABLE, are both leads.
 
 ```bash
-python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip
+python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip --static
 ```
 
-**Strip comments before any text-level scan**, of sources or of query files: prose
+**Strip comments before any text-level scan**, of sources or query files: prose
 mentioning `@function` or `%x` is not a capture or a binding. The spec's `skip_line`
-does it for source files; a one-off check has to do it itself. When a check reports
-several odd-looking hits at once, suspect the check before the parser.
+does it for sources; a one-off check must do it itself, and several odd hits at once
+point at the check before the parser.
 
 **Blast radius, around any grammar change:**
 
@@ -295,14 +296,16 @@ python3 scripts/probe.py diff "$T/before.json" "$T/after.json"
 
 Run this on every grammar change without exception. `diff` lists the files that now
 parse differently: node counts changed — grouped by the types that moved, so one odd
-file cannot hide among four hundred expected ones — or same counts with a different
-shape, a span, parent or field that moved. Every group needs an explanation before
-review, and every kind of real input the change moved owes a corpus case. This is
-the cheapest guard against a dialect-specific fix quietly damaging the general path.
+file cannot hide among four hundred expected ones — or same counts with a moved
+span, parent or field. Every group needs an explanation, and every kind of real
+input the change moved owes a corpus case: the cheapest guard against a dialect fix
+quietly damaging the general path.
 
 **Parse by hand with this checkout's parser:** `tree-sitter build -o LIB`, then
-`parse --lib-path LIB --lang-name NAME`. A plain `parse` picks a grammar by
-extension, and in a worktree it used the main checkout's. A census goes to a
+`parse --lib-path LIB --lang-name NAME`; a plain `parse` picks a grammar by
+extension, and in a worktree it used the main checkout's. In any second checkout,
+set `TREE_SITTER_LIBDIR=$(mktemp -d)` before `tree-sitter test` or fuzz: their cache
+is keyed by grammar name, so one checkout's build serves another. A census goes to a
 temporary path, never into the repository (Part 9).
 
 **The reference parser also answers one question the skeleton check does not:**
@@ -344,9 +347,8 @@ misled, a consumer broken, a claim that is false.
 # Part 5 · From finding to patch
 
 **Take one topic at a time.** One grammar or scanner theme per change; if it does
-not resolve within a couple of working sessions, split it rather than growing it. A
-large change forfeits the one review mechanism this project relies on: a corpus diff
-a person can actually read.
+not resolve within a couple of working sessions, split it. A large change forfeits
+the one review mechanism this project relies on: a corpus diff a person can read.
 
 **Write the minimal reproducer first, and write it as a corpus case.** Shrink the
 real input until one construct remains. Write the expected tree *by hand*, from the
@@ -358,11 +360,10 @@ fail before the change and the guards must pass before it; a guard checked only
 against the fixed parser pins nothing.
 
 **`tree-sitter test --update` output is a draft, never a result.** Read every line
-of the diff it produces. If the diff is too large to read, the change is too large
-to land. A hunk you do not understand is a hunk you have not verified. Before
-reading, run `probe.py corpus --before HEAD`: it groups the changed cases by the
-node types that moved and flags any whose input or leaf order moved — read those
-first.
+of the diff it produces; if it is too large to read, the change is too large to
+land. Before reading, run `probe.py corpus --before HEAD`: it groups the changed
+cases by the node types that moved and flags any whose input or leaf order moved —
+read those first.
 
 **Named nodes are not the whole tree.** Corpus trees, census, skeleton and probes
 all compare named nodes, so none of them sees an anonymous token appear or vanish.
@@ -443,19 +444,18 @@ that resolves one class and leaves a related one open is a fine outcome; a fix
 described as complete when it isn't will be trusted later by someone who shouldn't.
 
 **Have it reviewed cold.** Before it goes out, hand the change to a reviewer with
-this skill and none of your context — a fresh agent will do — asking what a
-maintainer would: what else did this move? Your context hides your assumptions; on
-2026-09-28 a cold review found every gap the maintainer's review then fixed.
+this skill and none of your context — a fresh agent will do — and ask what else it
+moved. On 2026-09-28 a cold review found every gap the maintainer's review then
+fixed.
 
 ---
 
 # Part 6 · Upstream example syncs
 
-A sync is when new real-world syntax enters the repository, so it is the moment the
-audit is worth the most — and also the moment it is easiest to turn into per-file
-review. `references/upstream-sync.md` has the six steps. Never edit files under
-`examples/` to make something pass: they are a pinned snapshot of someone else's
-repository, and editing them destroys the only reason they are evidence.
+A sync is when new real-world syntax enters, so the audit is worth most then — and
+is easiest to turn into per-file review. `references/upstream-sync.md` has the six
+steps. Never edit `examples/` to make something pass: it is a pinned snapshot of
+someone else's repository, and editing it destroys its value as evidence.
 
 ---
 
@@ -466,7 +466,8 @@ pick a directory the repository already ignores and confirm it
 (`git check-ignore -v tmp/`); if nothing is ignored, ask the maintainer.
 `assets/audit-log-template.md` gives the shape — a current state rewritten every
 pass, reference parser path included, then one appended entry per pass with its
-`provenance` lines and a status for each finding.
+`provenance` lines and a status for each finding. Not allowed to write there? Put
+the entry beside your work and say where, for the maintainer to merge.
 
 **The reason attached to an `accepted` or `out of scope` row is the whole point**:
 a status without one gets re-argued. One row per decision, never one per file — and
@@ -476,13 +477,12 @@ never a manifest, a coverage score or a release gate (Part 9).
 
 # Part 8 · Keep `docs/` accurate, in both directions
 
-The contract documents are the instrument this whole method depends on, so audit
-them both ways: forward, does the parser still honour what the document promises
-(Parts 3–6); backward, does the document still describe the code.
-`references/docs-contract.md` has the per-claim verification commands, how to tell a
-stale claim from a deliberate one, and the rule for amendments: a new node, field,
-conflict, scanner responsibility or dedicated branch is a contract change and needs
-its *reason* recorded beside it in the same commit.
+Audit the contract documents both ways, since this whole method depends on them:
+forward, does the parser still honour what they promise (Parts 3–6); backward, do
+they still describe the code. `references/docs-contract.md` has the per-claim
+commands, how to tell a stale claim from a deliberate one, and the amendment rule: a
+new node, field, conflict, scanner responsibility or dedicated branch records its
+*reason* beside it in the same commit.
 
 Updating a table to match reality is maintenance. Editing a principle so a patch
 becomes acceptable is not, and is not yours to do.

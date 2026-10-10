@@ -48,12 +48,14 @@
   歧义是语法自己造出来的，就重构；下一个 token 就能定，用静态 prec；要看更远的
   token，声明 conflict；两种读法都能走完，再加 `prec.dynamic`，并用 corpus 用例钉住
   胜出的读法；fuzz 不过或者要切边界，才进 lexer。加完跑
-  `probe.py conflicts --only RULE --runtime --flip`，附上 accepted-conflict 记录。
-  两种偏差：只因为 conflict 数会增加就拒绝；没有记录就加上。
+  `probe.py conflicts --only RULE --runtime --flip --static`，附上 accepted-conflict
+  记录。阶梯指向的级别和用户要的不一样时，两个方案都量，交给用户选。三种偏差：只因为
+  conflict 数会增加就拒绝；没有记录就加上；不说一声就按阶梯改掉用户要的做法。
 - **"现有的 conflict 都有必要吗" / "ARCHITECTURE.md 里的 conflict 表对不对"**
   → 跑 `probe.py conflicts`。报 UNNECESSARY 的提出删除；文档写的原因与 `generate`
   报的符号序列逐条对照。加 `--flip`，把移动了示例、却没有 corpus 用例钉住的一侧
-  当作线索落层：当前读法正确的补用例，读法有问题的按 Part 4 落层。
+  当作线索落层：当前读法正确的补用例，读法有问题的按 Part 4 落层。加 `--static`，
+  报 REPLACEABLE 的声明作为可以换成静态 prec 的线索提出。
 
 ## 2 · 容易误触发的相邻请求
 
@@ -192,6 +194,7 @@ python3 scripts/test_probe.py
 | 先 generate 未修改的 grammar，生成不了就以 2 退出 | 换了 CLI 版本后基线本身就生成不了，每个声明都被同一个无关的冲突「解释」 |
 | 「钉住」按 `tree-sitter test` 的方式比较：不比 range，期望树没有字段就不比字段，`:error` 用例不算 | 只挪了 span、或者只挪了 `:error` 用例的翻转被报成已被 corpus 钉住，其实测试照样通过 |
 | 输出只用 ASCII | 中日韩 Windows 上重定向输出时，`•` 在本地代码页里编码失败，第一个冲突就崩溃 |
+| `--static` 对每个必要的声明，把 `generate` 给出的每种静态解法换上去，报能否生成、哪些输入变化，不能生成的给出下一个冲突；只给线索，不影响退出码 | 第二轮走查要回答「能不能换成静态 prec」时只能自己写脚本 import `probe.py`；`--flip` 把权重加在规则上，回答不了 |
 | 不认识的生成错误照常报告；`src/` 里的子目录整个复制；相对路径的 `--cli` 按启动目录解析 | traceback 以 1 退出被当成发现；`src/scanner/` 目录让复制崩溃；生成在临时目录里跑，相对路径指向别处 |
 
 tree-sitter CLI 升级后，先在新版本下重抓夹具里的 parse 输出，再跑这组测试：输出格式的
@@ -224,8 +227,9 @@ tree-sitter CLI 升级后，先在新版本下重抓夹具里的 parse 输出，
 
 | 案例 | 触发 | 关键行为 | 偏差与代价 |
 | --- | --- | --- | --- |
-| §1「这里有歧义，加个 conflict 吧」（scratch 里删掉了 `_value_use_list × _value_use_and_type` 的声明和契约表里对应的一行） | 未测 | 没有因为 conflict 数会增加就拒绝，也没有直接加回。复现 generate 的报错，用符号序列造输入跑 `-d`：两种读法都能走完，由符号顺序决定，树完全相同；`mlir-opt` 只接受 bulk 形式。判为第 1 级，量了三个方案：照原样加回；合并两条隐藏规则（+9 个状态，树不变，fuzz 通过）；删掉 per-pair 形式（否决：会收窄通用路径）。停下来请用户选，记录写进被忽略的审计记录 | 50 次工具调用，约 14 分钟。暴露的缺口：第 4 级没写「两种读法的树相同就是第 1 级」（已补）；`mlir.md` 的「harmless today」容易被读成可以照旧加回（已改）；没写阶梯指向的级别高于用户要求时该怎么办；Part 0 没覆盖 generate 不了的工作树，而失败的 generate 照样会改写 `src/grammar.json`；`tree-sitter test` 和 fuzz 编译到按语言名缓存的共享目录，scratch 里的构建会覆盖主 checkout 用的库 |
-| §1「现有的 conflict 都有必要吗 / conflict 表对不对」 | 未测 | provenance、generate、基线之后跑 `conflicts` 和 `--runtime --flip`，数字与 `mlir.md` 一致。又把每个声明换成静态 prec 做对照，并对照 MLIR 源码。5 个 UNPINNED 逐个落层：1 个缺陷，3 个补用例，1 个归到另一处歧义。它的结论是：11 个都是 load-bearing，但有 6 个可以换成静态 prec，其中两个当前选错了；表里第 1–3、4、7、10 行的原因不准。没有改任何受控文件 | 79 次工具调用，约 19 分钟。暴露的缺口：`--runtime` 只是下界，`stack_node_add_link` 会静默合并等价链接（已写进 mechanics）；`mlir.md` 说「几乎都在 `affine.for` 下」是错的，`_affine_for_operation_repeat1` 是所有 custom body 共用的 repeat（已改）；没有工具能回答「这个声明能不能换成静态 prec」，因为 `--flip` 把权重加在规则上；import `probe.py` 会在 skill 目录里写 `__pycache__` |
+| §1「这里有歧义，加个 conflict 吧」（scratch 里删掉了 `_value_use_list × _value_use_and_type` 的声明和契约表里对应的一行） | 未测 | 没有因为 conflict 数会增加就拒绝，也没有直接加回。复现 generate 的报错，用符号序列造输入跑 `-d`：两种读法都能走完，由符号顺序决定，树完全相同；`mlir-opt` 只接受 bulk 形式。判为第 1 级，量了三个方案：照原样加回；合并两条隐藏规则（+9 个状态，树不变，fuzz 通过）；删掉 per-pair 形式（否决：会收窄通用路径）。停下来请用户选，记录写进被忽略的审计记录 | 50 次工具调用，约 14 分钟。暴露的缺口：第 4 级没写「两种读法的树相同就是第 1 级」（已补）；`mlir.md` 的「harmless today」容易被读成可以照旧加回（已改）；没写阶梯指向的级别高于用户要求时该怎么办（已补，mechanics）；Part 0 没覆盖 generate 不了的工作树，而失败的 generate 照样会改写 `src/grammar.json`（已补，Part 0）；`tree-sitter test` 和 fuzz 编译到按语言名缓存的共享目录，scratch 里的构建会覆盖主 checkout 用的库（已补，Part 3 和 mechanics：第二个 checkout 一律设 `TREE_SITTER_LIBDIR`） |
+| §1「现有的 conflict 都有必要吗 / conflict 表对不对」 | 未测 | provenance、generate、基线之后跑 `conflicts` 和 `--runtime --flip`，数字与 `mlir.md` 一致。又把每个声明换成静态 prec 做对照，并对照 MLIR 源码。5 个 UNPINNED 逐个落层：1 个缺陷，3 个补用例，1 个归到另一处歧义。它的结论是：11 个都是 load-bearing，但有 6 个可以换成静态 prec，其中两个当前选错了；表里第 1–3、4、7、10 行的原因不准。没有改任何受控文件 | 79 次工具调用，约 19 分钟。暴露的缺口：`--runtime` 只是下界，`stack_node_add_link` 会静默合并等价链接（已写进 mechanics）；`mlir.md` 说「几乎都在 `affine.for` 下」是错的，`_affine_for_operation_repeat1` 是所有 custom body 共用的 repeat（已改）；没有工具能回答「这个声明能不能换成静态 prec」，因为 `--flip` 把权重加在规则上（已补：`--static`）；import `probe.py` 会在 skill 目录里写 `__pycache__`（测试已关掉字节码；有了 `--static` 也不必再自己 import） |
 
 两轮都没有把「conflict 数会增加」当成拒绝的理由，也都没有不带记录就加。两轮都卡在同一处：Part 7 要求审计
-记录放在主 checkout，而这一轮 agent 只被允许写 scratch。
+记录放在主 checkout，而这一轮 agent 只被允许写 scratch（已补：写在工作旁边，说明位置，由维护者合并）。
+第二轮的 MLIR 线索复核后提成了 felixtensor/tree-sitter-mlir #82–#85。

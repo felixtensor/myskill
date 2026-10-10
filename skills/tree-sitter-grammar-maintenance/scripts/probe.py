@@ -18,7 +18,7 @@ Usage:
     probe.py corpus     --repo DIR --spec FILE [--before REV]
     probe.py probe      --repo DIR --spec FILE [--id ID]... [--files GLOB]
     probe.py census     --repo DIR --spec FILE --out FILE
-    probe.py conflicts  --repo DIR [--spec FILE] [--only RULE]... [--runtime] [--flip]
+    probe.py conflicts  --repo DIR [--spec FILE] [--only RULE]... [--runtime] [--flip] [--static]
     probe.py diff       BEFORE.json AFTER.json   (two censuses or two skeletons)
 
 Exit status: 0 when every selected check holds, 1 on any hit, 2 on a tooling
@@ -1531,6 +1531,9 @@ def cmd_diff(args):
 # summed over a reading, so it only has to outweigh what the grammar already
 # assigns; any reading that contains the rule wins.
 FLIP_WEIGHT = 10000
+# Static precedence put on one side in place of a declaration for --static:
+# high enough to beat what the grammar already assigns around the rule.
+STATIC_WEIGHT = 1000
 # The runtime's choices between complete readings, from `parse -d`
 # (lib/src/parser.c, ts_parser__select_tree and ts_parser__reduce).
 # `select_existing` is logged when the two subtrees compare equal. The
@@ -1759,7 +1762,10 @@ def runtime_decisions(cmd, files, args):
 
 
 def explain_declarations(cli, grammar, selected, declared, tmp):
-    """Print what each selected declaration resolves; return the findings.
+    """Print what each selected declaration resolves.
+
+    Returns the findings, and {declaration: the error `generate` reports
+    without it} for the ones that are needed.
 
     The unmodified grammar is generated first: if it does not build with this
     CLI, every declaration would be "explained" by the same unrelated
@@ -1771,7 +1777,7 @@ def explain_declarations(cli, grammar, selected, declared, tmp):
                          "nothing below would mean anything. Regenerate with "
                          "the repository's own CLI, or name the right one with "
                          f"--cli:\n{json.dumps(error)[:300]}")
-    findings, seen = 0, set()
+    findings, seen, needed = 0, set(), {}
     for k, conflict in enumerate(selected):
         key = tuple(sorted(conflict))
         print(f"\n[{', '.join(conflict)}]")
@@ -1789,11 +1795,12 @@ def explain_declarations(cli, grammar, selected, declared, tmp):
             print("     UNNECESSARY: the grammar generates without it. "
                   "Remove it, or find the conflict it was meant for.")
             continue
+        needed[tuple(conflict)] = error
         for line in explain_conflict(error):
             print(f"     {line}")
     print("\nEach is the first state that needs the declaration; it may "
           "cover others.")
-    return findings
+    return findings, needed
 
 
 def report_runtime(base_cmd, inputs, label, args):
@@ -1819,29 +1826,55 @@ def report_runtime(base_cmd, inputs, label, args):
             print(f"    {len(paths):6d}  {sym:40s} e.g. {label(paths[0])}")
 
 
-def report_flip(cli, grammar, repo, selected, lang, base_cmd, inputs, cases,
-                label, args, tmp):
-    """Favour each side in turn; print what moves; return the findings."""
-    how_by_path = {p: how for p, (_label, how) in cases.items()}
+def build_variants(cli, repo, variants, tmp, prefix, jobs):
+    """{key: library path, or the error generate reports} for each
+    (key, grammar), built side by side."""
+    def one(i, grammar):
+        workdir = os.path.join(tmp, f"{prefix}-{i}")
+        error = generate_summary(cli, grammar, workdir)
+        if error:
+            return error
+        return build_variant(cli, grammar, repo, workdir, generated=True)
 
-    def pins(cmd):
+    with ThreadPoolExecutor(max_workers=max(1, jobs)) as pool:
+        futures = [(key, pool.submit(one, i, g))
+                   for i, (key, g) in enumerate(variants)]
+        return {key: fut.result() for key, fut in futures}
+
+
+class Moves:
+    """Which inputs a variant parser moves, against the unmodified one."""
+
+    def __init__(self, cli, lang, repo, base_cmd, inputs, cases, args):
+        self.cli, self.lang, self.repo, self.args = cli, lang, repo, args
+        self.inputs, self.cases = inputs, cases
+        self.how = {p: how for p, (_label, how) in cases.items()}
+        self.base = self.pins(base_cmd)
+
+    def pins(self, cmd):
         return {path: entry for path, entry in
-                map_files(repo, cmd, inputs, args, pin_file, how_by_path)}
+                map_files(self.repo, cmd, self.inputs, self.args, pin_file,
+                          self.how)}
 
-    base = pins(base_cmd)
+    def of(self, lib):
+        """(corpus cases that would fail, example files that move)."""
+        after = self.pins(self.cli + ["parse", "--lib-path", lib,
+                                      "--lang-name", self.lang])
+        moved = [p for p in self.inputs if after.get(p) != self.base.get(p)]
+        return ([self.cases[p][0] for p in moved if p in self.cases],
+                [p for p in moved if p not in self.cases])
+
+
+def report_flip(cli, grammar, repo, selected, moves, label, args, tmp):
+    """Favour each side in turn; print what moves; return the findings."""
     # The weight goes on a rule, not on a declaration, so a rule in two
     # conflicts is one variant, built and reported once.
     rules = []
     for c in selected:
         rules.extend(r for r in c
                      if r in grammar.get("rules", {}) and r not in rules)
-    libs = {}
-    with ThreadPoolExecutor(max_workers=max(1, args.jobs)) as pool:
-        futures = {r: pool.submit(build_variant, cli, favoured(grammar, r), repo,
-                                  os.path.join(tmp, f"flip-{i}"))
-                   for i, r in enumerate(rules)}
-        for rule, fut in futures.items():
-            libs[rule] = fut.result()
+    libs = build_variants(cli, repo, [(r, favoured(grammar, r)) for r in rules],
+                          tmp, "flip", args.jobs)
     print(f"\nflip: each side favoured by dynamic precedence {FLIP_WEIGHT}, "
           "against the same grammar unweighted")
     findings, reported = 0, {}
@@ -1855,12 +1888,11 @@ def report_flip(cli, grammar, repo, selected, lang, base_cmd, inputs, cases,
                       f"[{', '.join(reported[rule])}] above")
                 continue
             reported[rule] = conflict
-            after = pins(cli + ["parse", "--lib-path", libs[rule],
-                                "--lang-name", lang])
-            moved = [p for p in inputs if after.get(p) != base.get(p)]
-            pinned = [cases[p][0] for p in moved if p in cases]
-            loose = [p for p in moved if p not in cases]
-            if not moved:
+            if not isinstance(libs[rule], str):
+                raise SystemExit(f"favouring {rule} stopped the grammar "
+                                 f"generating: {json.dumps(libs[rule])[:300]}")
+            pinned, loose = moves.of(libs[rule])
+            if not (pinned or loose):
                 print(f"     favour {rule}: no named node moves")
                 continue
             verdict = (f"pinned by {len(pinned)} corpus case(s)"
@@ -1877,6 +1909,76 @@ def report_flip(cli, grammar, repo, selected, lang, base_cmd, inputs, cases,
           "moves nothing may still be a genuine ambiguity whose readings "
           "differ only in hidden nodes or anonymous tokens; --runtime shows it.")
     return findings
+
+
+def statically(grammar, conflict, rule, kind):
+    """The grammar without `conflict`, settled instead by a static
+    precedence or associativity on `rule`, as generate suggests."""
+    g = json.loads(json.dumps(grammar))
+    g["conflicts"] = [c for c in g["conflicts"]
+                      if tuple(sorted(c)) != tuple(sorted(conflict))]
+    wrapper = {"prec": ("PREC", STATIC_WEIGHT), "left": ("PREC_LEFT", 0),
+               "right": ("PREC_RIGHT", 0)}[kind]
+    g["rules"][rule] = {"type": wrapper[0], "value": wrapper[1],
+                        "content": g["rules"][rule]}
+    return g
+
+
+def static_options(error):
+    """[(kind, rule)] for each static resolution generate offered."""
+    tables = error.get("BuildTables") if isinstance(error, dict) else None
+    cf = tables.get("Conflict") if isinstance(tables, dict) else None
+    out = []
+    for r in (cf or {}).get("possible_resolutions", []):
+        for kind, body in r.items():
+            syms = body.get("symbols", []) if isinstance(body, dict) else []
+            if kind == "Precedence":
+                out.extend(("prec", s) for s in syms)
+            elif kind == "Associativity":
+                out.extend((k, s) for s in syms for k in ("left", "right"))
+    return out
+
+
+def report_static(cli, grammar, repo, needed, moves, label, args, tmp):
+    """Try each static resolution in place of each declaration; print what
+    generates and what it moves. Leads only: nothing here is a finding."""
+    variants, plan = [], []
+    for conflict, error in needed.items():
+        options = [(k, r) for k, r in static_options(error)
+                   if r in grammar.get("rules", {})]
+        plan.append((conflict, options))
+        variants.extend(((conflict, k, r), statically(grammar, conflict, r, k))
+                        for k, r in options)
+    built = build_variants(cli, repo, variants, tmp, "static", args.jobs)
+    names = {"prec": f"prec({STATIC_WEIGHT})", "left": "prec.left",
+             "right": "prec.right"}
+    print("\nstatic: each resolution generate offers, in place of the "
+          "declaration")
+    for conflict, options in plan:
+        print(f"\n[{', '.join(conflict)}]")
+        if not options:
+            print("     no static resolution offered")
+        for kind, rule in options:
+            what = f"{names[kind]} on {rule}"
+            result = built[(conflict, kind, rule)]
+            if not isinstance(result, str):
+                print(f"     {what}: does not generate; "
+                      + explain_conflict(result)[0])
+                continue
+            pinned, loose = moves.of(result)
+            if not (pinned or loose):
+                print(f"     {what}: no named node moves -- REPLACEABLE on "
+                      "these inputs")
+                continue
+            print(f"     {what}: {len(loose)} example file(s) move; "
+                  + (f"{len(pinned)} corpus case(s) would fail" if pinned
+                     else "no corpus case would fail"))
+            for name in (pinned or [label(p) for p in loose])[:args.show]:
+                print(f"       {name}")
+    print("\nA static resolution decides in the table, before any later token "
+          "is read. REPLACEABLE means it changes no named node on these "
+          "inputs, not that it is right on all input. A wrapper goes outside "
+          "the rule, so precedences written inside it still win.")
 
 
 def cmd_conflicts(args):
@@ -1917,8 +2019,9 @@ def cmd_conflicts(args):
         return 0
 
     with tempfile.TemporaryDirectory(prefix="probe-conflicts-") as tmp:
-        findings = explain_declarations(cli, grammar, selected, declared, tmp)
-        if not (args.runtime or args.flip):
+        findings, needed = explain_declarations(cli, grammar, selected,
+                                                declared, tmp)
+        if not (args.runtime or args.flip or args.static):
             return 1 if findings else 0
 
         files = example_inputs(repo, spec, args)
@@ -1940,9 +2043,13 @@ def cmd_conflicts(args):
 
         if args.runtime:
             report_runtime(base_cmd, inputs, label, args)
+        if args.flip or args.static:
+            moves = Moves(cli, lang, repo, base_cmd, inputs, cases, args)
         if args.flip:
-            findings += report_flip(cli, grammar, repo, selected, lang, base_cmd,
-                                    inputs, cases, label, args, tmp)
+            findings += report_flip(cli, grammar, repo, selected, moves, label,
+                                    args, tmp)
+        if args.static:
+            report_static(cli, grammar, repo, needed, moves, label, args, tmp)
     return 1 if findings else 0
 
 
@@ -2024,6 +2131,9 @@ def main(argv=None):
     p.add_argument("--flip", action="store_true",
                    help="favour each side in turn; report trees that move and "
                         "whether a corpus case pins them")
+    p.add_argument("--static", action="store_true",
+                   help="try each static resolution generate offers in place "
+                        "of the declaration; report what generates and moves")
     p.add_argument("--files", nargs="*",
                    help="example inputs (default: the spec's globs, else "
                         "examples/ by tree-sitter.json file types)")
