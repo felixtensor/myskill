@@ -106,11 +106,12 @@ def fix_file(filepath):
         # comments and old "..." strings are lookup keys, not translations.
         if is_reference_or_control_line(line):
             continue
+        fixed_line = line
         for pattern, replacement in TERM_FIXES:
-            new_line, count = re.subn(pattern, replacement, line)
-            if count > 0:
-                lines[i] = new_line
-                changes += count
+            fixed_line, count = re.subn(pattern, replacement, fixed_line)
+            changes += count
+        if fixed_line != line:
+            lines[i] = fixed_line
 
     if changes > 0:
         with open(filepath, 'w', encoding='utf-8') as f:
