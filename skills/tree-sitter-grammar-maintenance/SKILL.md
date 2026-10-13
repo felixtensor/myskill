@@ -1,26 +1,15 @@
 ---
 name: tree-sitter-grammar-maintenance
-description: Work on a tree-sitter grammar as a closed loop — compare against the language's own reference parser, locate the defect, fix it, verify, repeat — and hold every change against the architecture contract so a fix for one dialect cannot quietly narrow the general parsing path. Use it to find the root cause of a failing corpus or highlight test, to repair tests after a grammar or scanner edit, to audit for silent misparses that pass every gate, before accepting `tree-sitter test --update` output, when adding support for new syntax or deciding whether to declare a conflict, after an upstream example sync, and when docs/ARCHITECTURE.md or docs/QUERIES.md may have drifted. Set up for tree-sitter-mlir; tree-sitter-tablegen and tree-sitter-pdll come under it through onboarding. Expect "why does this test fail", "this parses wrong", "I changed the grammar and tests broke", "扫一下解析有没有问题", "这个语法解析得不对", "加条规则支持这个方言". Not a general MLIR or compiler question answerer.
+description: "Audit and repair existing tree-sitter grammars: investigate failing tests or silent misparses, review grammar/scanner changes and conflict decisions, and verify architecture or query contracts. Use for parser defects, test-update reviews, syntax additions, and upstream example syncs. Includes an MLIR profile; onboard other languages from their own contracts. Not for general compiler semantics or writing a grammar from scratch."
 ---
 
 # Tree-sitter grammar maintenance
 
 **A parse that reports no ERROR is not evidence that the tree is correct.**
 
-A permissive fallback rule has no hard terminator. When it meets syntax it was not
-told to stop at, it does not fail — it absorbs. The absorbed text still appears in
-the tree, in the wrong place, under the wrong parent, with no ERROR and no MISSING.
-Then someone runs `tree-sitter test --update`, the wrong shape is written into the
-corpus as the *expected* result, and from that moment the defect is invisible to
-every gate at once — including the one the project calls its only persistent source
-of truth. It hides in the most ordinary syntax in the language, precisely because
-ordinary syntax is what nobody re-reads.
-
-The second half of the job follows from the first. Once a defect is found, the
-pressure is to patch the grammar until the symptom goes away. That is how a
-general-purpose parser rots into a pile of dialect-specific special cases. The
-architecture document exists to stop exactly that, and it only works if it is
-maintained as a contract rather than as prose that trails the code.
+A permissive fallback can absorb later constructs without reporting ERROR or
+MISSING. Generated expectations can then teach the corpus to accept the defect.
+Read expected trees against their inputs and the project's contract.
 
 ## Two ways in
 
@@ -55,14 +44,14 @@ after a fix is the next lead.
 
 | Read | When |
 | --- | --- |
-| `references/mlir.md` | whenever you work in `tree-sitter-mlir` — its gates, layer table, principles as questions, lexical traps, reference-parser setup, two worked triages |
-| `references/tree-sitter-mechanics.md` | before editing a grammar rule or declaring a conflict, and when repairing tests after one |
-| `references/highlight-captures.md` | when the change touches queries or captures |
-| `references/docs-contract.md` | Part 8 |
-| `references/upstream-sync.md` | Part 6 |
-| `references/onboarding.md` | a repository with no contract document |
-| `references/boundaries.md` | when asked for something this skill refuses |
-| `assets/audit-log-template.md` | Part 7 |
+| [MLIR profile](references/mlir.md) | whenever you work in `tree-sitter-mlir` — its gates, layer table, principles as questions, lexical traps, reference-parser setup, two worked triages |
+| [Mechanics](references/tree-sitter-mechanics.md) | before editing a grammar rule or declaring a conflict, and when repairing tests after one |
+| [Captures](references/highlight-captures.md) | when the change touches queries or captures |
+| [Document contract](references/docs-contract.md) | Part 8 |
+| [Upstream sync](references/upstream-sync.md) | Part 6 |
+| [Onboarding](references/onboarding.md) | a repository with no contract document |
+| [Boundaries](references/boundaries.md) | when asked for something this skill refuses |
+| [Audit template](assets/audit-log-template.md) | Part 7 |
 
 ## What writes, and what needs a yes first
 
@@ -71,7 +60,7 @@ does write is here, so none of it happens as a side effect of a check:
 
 | Action | Writes | Before doing it |
 | --- | --- | --- |
-| `tree-sitter generate` — freshness check, every grammar change | `src/` in the working tree | nothing; `git diff` shows it and `git checkout -- src/` undoes it |
+| `tree-sitter generate` — freshness check, every grammar change | `src/` in the working tree | preserve existing `src/` changes; inspect the generated diff |
 | grammar, scanner, corpus and query edits (Part 5) | tracked files | the change is what the user asked for |
 | `npm ci` — toolchain repair | `node_modules/`, over the network | **ask** |
 | a tree-sitter release binary — toolchain repair | `node_modules/tree-sitter-cli/`, downloaded | **ask**, naming the URL |
@@ -84,90 +73,28 @@ nothing here amends the contract's principles.
 
 # Part 0 · Ground yourself before you measure anything
 
-**Identify the repository and load its contract.**
+Read [audit setup](references/audit-workflow.md) before running probes. Identify
+this checkout, read its contract and existing audit record, and establish toolchain
+provenance and a baseline. Preserve existing generated-file edits before a
+freshness check; failed generation can still rewrite `src/grammar.json`.
 
-| Repository | Contract document | Invariant spec | Language layer |
-| --- | --- | --- | --- |
-| `tree-sitter-mlir` | `docs/ARCHITECTURE.md` | `assets/invariants/mlir.json` | `references/mlir.md` |
-| `tree-sitter-tablegen` | — | — | `references/onboarding.md` |
-| `tree-sitter-pdll` | — | — | `references/onboarding.md` |
+Use [MLIR](references/mlir.md) and `assets/invariants/mlir.json` only for an MLIR
+repository. Other languages use their own contract, spec and gates; if these are
+missing, follow [onboarding](references/onboarding.md) and state the coverage limit.
 
-Read the contract document before you read a single tree. It is not background
-material; it is the specification you are about to audit against. A repository with
-no contract document cannot be adjudicated at all — see `references/onboarding.md`.
-
-**Read the audit record next** (Part 7). Its current-state block says which findings
-are open, which were examined and *deliberately accepted*, which invariants were
-clean, and which reference parser the last pass used. Re-litigating a settled
-trade-off is the most common way this work gets repeated.
-
-**The reference parser is declared by the user, never discovered.** Do not search
-`PATH` or try likely names: a comparison against a tool nobody chose reads as
-authoritative while resting on nothing. Take, in order, the path the user gave in
-this session; the absolute path in the audit record; otherwise ask — with the
-client's question mechanism where there is one — and wait. The spec's `tool_hint`
-says what kind of tool serves, and `probe.py` refuses one that fails the spec's
-self-check, so a wrong answer fails loudly. When the user's tool fails it and the
-record names another, ask before switching. **If the user has none**, run the other
-checks and **say in the report that the reference comparison did not run and
-coverage is reduced** — a fine outcome, as long as it is not presented as complete.
-
-**Check the toolchain, and record what produced the numbers.** From the skill
-directory:
-
-```bash
-REPO=/path/to/tree-sitter-mlir          # wherever the checkout actually lives
-SPEC=assets/invariants/mlir.json
-TOOL=/path/declared/by/the/user         # leave --tool off if there is none
-python3 scripts/probe.py provenance --repo "$REPO" --spec "$SPEC" --tool "$TOOL"
-```
-
-It prints the audit record's provenance lines — commit, the CLI against the lock
-file and against what the CI workflows pin, the reference parser's absolute path and
-version, the skill version — and exits 1 when either CLI differs from the lock:
-numbers from a parser CI would not build are worthless, and each check has caught a
-real drift. Without a lock file, CI takes the newest CLI in the declared range, so
-name the version you measured with.
-
-On a mismatch, **ask before repairing** with `npm ci`, then rerun `provenance`: npm
-may block the CLI's install script and leave no binary. The remaining repair, the
-matching release binary in `node_modules/tree-sitter-cli/`, is a download: ask
-again.
-
-**Then confirm the committed parser matches the grammar source:**
-
-```bash
-(cd "$REPO" && npx tree-sitter generate && git status --short -- src/)
-```
-
-It prints nothing when the checked-in parser is current, and covers every generated
-file — `src/node-types.json`, where the public AST surface is checked, and anything
-a newer CLI adds. Any output means stale artifacts: measure on the regenerated
-parser and say so. If `generate` fails, it has still rewritten `src/grammar.json`
-(`git checkout -- src/` restores it), and `tree-sitter test` keeps passing on the
-old parser: report that the working tree does not generate, and measure the
-committed one.
-
-**Record the baseline.** Run the repository's own gates and write down what they
-say, unchanged:
-
-```bash
-npm run test
-npm run test:examples
-```
-
-Expect them to be green. That is the point: the audit starts where the gates stop.
+Reuse the reference executable declared in this session or the audit record.
+Otherwise ask; do not search PATH for a plausible substitute. Without a reference
+parser, continue the other checks and report that comparison did not run.
 
 ---
 
 # Part 1 · What counts as evidence
 
-There is no node-for-node oracle: a compiler's in-memory IR is what remains *after*
-parsing, and mapping it onto a CST means a second interpreter that itself needs
-verifying — a dead end that left a ledger nobody could finish reviewing. **But there
-is a skeleton oracle.** Normalize the input with the reference parser and parse *its
-output* with the same grammar: both sides are CSTs from one parser, the mapping is
-the identity, and the reference side carries the language's own answer.
+A reference parser answers what syntax is legal, but its output may include
+semantic expansion or printer-added structure. Compare only quantities the language
+profile proves are preserved. When the tool prints syntax this grammar also parses,
+compare both CSTs with the same parser; [MLIR](references/mlir.md) documents that
+route. Otherwise define and validate a narrow mapping during onboarding.
 
 Five lines of evidence follow, each with its own job. Do not treat them as one
 checklist — confusing them is how false confidence forms. In the order to reach for
@@ -211,109 +138,21 @@ the whole reason the parser was written instead of hard-coding the ecosystem.
 
 # Part 3 · Run the probes
 
-`scripts/probe.py` is standard-library Python and writes nothing into the parser
-repository. Run it from the skill directory with `REPO`, `SPEC` and `TOOL` set as in
-Part 0. `--show N` widens what a command prints and `--show 0` leaves summary lines;
-the commands that parse use every core, and `--jobs N` limits them.
+Follow [probe commands and interpretation](references/audit-workflow.md).
+For a full audit, run supported reference comparison, corpus self-consistency and
+structural invariants. For a narrow failing test, start with its input and tree;
+expand checks according to the patch's effects.
 
-**Compare against the reference parser first, where one exists:**
+Group hits by structural mode and triage them against the contract. A candidate
+is not a confirmed bug; skipped inputs and zero comparisons are coverage limits.
+The language profile explains which counts survive normalization and which only
+provide an upper bound. Do not transplant MLIR's count assumptions to another
+language.
 
-```bash
-python3 scripts/probe.py skeleton --repo "$REPO" --spec "$SPEC" --tool "$TOOL"
-python3 scripts/probe.py skeleton --repo "$REPO" --spec "$SPEC" --tool "$TOOL" --limit 80
-```
-
-`--limit N` compares N files spread evenly across the set. The command normalizes
-each input with the reference tool, parses that output with the same grammar, and
-compares quantities the printer preserves — for MLIR, the results each file binds
-(`%0:2` counts two, because the printer regroups `%a, %b`), and the operation,
-region and block counts. Read it as a **ranked lead generator, not a gate**:
-
-- **grammar above the reference** — always a defect, on any quantity: the grammar
-  invented structure the language's parser does not see. Open these first.
-- **grammar below the reference, large gap** — a strong signal on a `ranked`
-  quantity, and the top of the list is where to look. On a `ceiling` quantity the
-  reference is expected to count more, for the reason the spec states — which is
-  also where a swallowed operation hides, so leave those to the invariants.
-- **small gaps** — often a legitimate printing difference; the language layer
-  documents which, and why a green number here would be meaningless.
-
-Files the tool declines are a coverage limit, not a parser signal: say how many were
-skipped. A run that compared nothing exits 2; never report it as clean.
-
-**Corpus self-consistency — needs no parser at all:**
-
-```bash
-python3 scripts/probe.py corpus --repo "$REPO" --spec "$SPEC"
-```
-
-It compares each case's input with its own expected tree; a case that contradicts
-its input was accepted from `--update` without being read.
-
-**Structural invariants over the example set:**
-
-```bash
-python3 scripts/probe.py probe --repo "$REPO" --spec "$SPEC"
-python3 scripts/probe.py probe --repo "$REPO" --spec "$SPEC" --id op-result-binding --show 10
-```
-
-Hits are grouped by **mode** — what a hit looks like structurally, such as
-`value_use in custom_operation` for a binding a body swallowed. Ten thousand hits in
-one mode are one finding: triage modes, not files. Each invariant kind mechanizes a
-contract statement:
-
-- `line_produces` — a source line of a given shape must start a node of a given
-  type; a lost or re-attributed binding fails it.
-- `no_node` — no ERROR or MISSING. A MISSING token is anonymous, so it comes from
-  the CLI's error line, which names only a file's *first* error: fix it and rerun.
-- `span_guard` — a node must not cross a line that unambiguously starts the next
-  sibling; with `check_after_last`, also after the node's own region closes.
-
-Keep invariants few, narrow and high-precision. An invariant that fires on ordinary
-correct code is worse than no invariant, because it trains you to skim the output.
-
-**What each declared conflict decides.** A flip that moves examples but would fail no
-corpus test, and a declaration `--static` calls REPLACEABLE, are both leads.
-
-```bash
-python3 scripts/probe.py conflicts --repo "$REPO" --spec "$SPEC" --runtime --flip --static
-```
-
-**Strip comments before any text-level scan**, of sources or query files: prose
-mentioning `@function` or `%x` is not a capture or a binding. The spec's `skip_line`
-does it for sources; a one-off check must do it itself, and several odd hits at once
-point at the check before the parser.
-
-**Blast radius, around any grammar change:**
-
-```bash
-T=$(mktemp -d)
-python3 scripts/probe.py census --repo "$REPO" --spec "$SPEC" --out "$T/before.json"
-# ... make the grammar change, then ...
-python3 scripts/probe.py census --repo "$REPO" --spec "$SPEC" --out "$T/after.json"
-python3 scripts/probe.py diff "$T/before.json" "$T/after.json"
-```
-
-Run this on every grammar change without exception. `diff` lists the files that now
-parse differently: node counts changed — grouped by the types that moved, so one odd
-file cannot hide among four hundred expected ones — or same counts with a moved
-span, parent or field. Every group needs an explanation, and every kind of real
-input the change moved owes a corpus case: the cheapest guard against a dialect fix
-quietly damaging the general path.
-
-**Parse by hand with this checkout's parser:** `tree-sitter build -o LIB`, then
-`parse --lib-path LIB --lang-name NAME`; a plain `parse` picks a grammar by
-extension, and in a worktree it used the main checkout's. In any second checkout,
-set `TREE_SITTER_LIBDIR=$(mktemp -d)` before `tree-sitter test` or fuzz: their cache
-is keyed by grammar name, so one checkout's build serves another. A census goes to a
-temporary path, never into the repository (Part 9).
-
-**The reference parser also answers one question the skeleton check does not:**
-whether an input is legal at all. The language layer has the command. Ask it before
-blaming the grammar for failing on something, and before building a corpus case out
-of syntax you wrote by hand — a case whose input the language itself rejects is not
-evidence of anything. Record the command and the tool version wherever you cite its
-output.
+Every grammar change gets before/after census and a diff with an explanation for
+each changed group; with a reference parser, also compare saved skeleton runs.
+Keep outputs in a temporary directory. Build and parse with this checkout's parser,
+and isolate `TREE_SITTER_LIBDIR` for second-checkout test/fuzz runs.
 
 ---
 
@@ -346,107 +185,20 @@ misled, a consumer broken, a claim that is false.
 
 # Part 5 · From finding to patch
 
-**Take one topic at a time.** One grammar or scanner theme per change; if it does
-not resolve within a couple of working sessions, split it. A large change forfeits
-the one review mechanism this project relies on: a corpus diff a person can read.
+Read [repair and verification](references/patch-workflow.md) before changing the
+parser. It preserves the required sequence: hand-written failing corpus case and
+passing false-positive guards, a contract-supported repair, then applicable gates
+and before/after comparisons.
 
-**Write the minimal reproducer first, and write it as a corpus case.** Shrink the
-real input until one construct remains. Write the expected tree *by hand*, from the
-contract. Confirm it fails. Only then open the grammar. Never do this in the other
-order: generating the tree first and reading it second is precisely how the defect
-got into the corpus to begin with. Write the false-positive guards at the same time:
-inputs that look like the defect and parse correctly today. The direct hits must
-fail before the change and the guards must pass before it; a guard checked only
-against the fixed parser pins nothing.
+Read [tree-sitter mechanics](references/tree-sitter-mechanics.md) for grammar,
+scanner, precedence or conflict edits. Generated test updates are review drafts;
+named-node equality cannot prove full-CST equality. Pin alternate construction
+paths with `:cst` cases. Dedicated rules need the four conditions in the repair
+reference, including a guard for unknown extension syntax.
 
-**`tree-sitter test --update` output is a draft, never a result.** Read every line
-of the diff it produces; if it is too large to read, the change is too large to
-land. Before reading, run `probe.py corpus --before HEAD`: it groups the changed
-cases by the node types that moved and flags any whose input or leaf order moved —
-read those first.
-
-**Named nodes are not the whole tree.** Corpus trees, census, skeleton and probes
-all compare named nodes, so none of them sees an anonymous token appear or vanish.
-When a change builds an existing node a second way — an alias, an external token,
-another rule — pin both paths against each other with a `:cst` corpus case;
-`references/tree-sitter-mechanics.md` has the scanner pattern that keeps them equal.
-
-**Put the fix through the principles before you put it through the tests.** State,
-in the commit message or PR, which principle justifies it.
-`references/tree-sitter-mechanics.md` holds the precedence and conflict mechanics
-that decide which grammar edit can possibly work; read it before the edit, not after
-one mysteriously does nothing.
-
-**A conflict is a modelling decision, not a defeat.** Languages are locally
-ambiguous, and tree-sitter is GLR so a grammar can say so. Refuse a conflict without
-its record, or one that leaves a genuine ambiguity to rule order. The mechanics file
-has the ladder and the record; after any conflict or weight change,
-`probe.py conflicts --runtime --flip` measures what it decides.
-
-**A dedicated rule for one construct needs all four of these**, not three:
-
-1. A specific issue, an upstream failure, or a downstream consumer that is blocked.
-2. A minimal input that reproduces what the general path loses.
-3. A readable corpus case for the new structure — **plus a corpus case proving the
-   generic fallback for unknown extension syntax still works**, shaped like the
-   construct you specialised (for MLIR, an unregistered `test.*` operation). This is
-   the guard that stops a dialect fix from quietly narrowing the general path, and it
-   is the single most important test in a dedicated-branch change.
-4. New conflicts, recursion, scanner responsibility and parser size proportional to
-   the benefit.
-
-When no principle supports the change, stop and take it to the maintainer as a
-contract question — do not weaken the contract to fit the patch.
-
-**Then run the gates the change actually touches.** Do not force every change
-through the same list; do not skip a gate that applies. The language layer lists the
-repository's own; the shape is:
-
-```bash
-npx tree-sitter generate       # must exit 0; a newly declared conflict carries its record
-npm run test                   # corpus + highlight fixtures
-npm run test:examples          # ERROR/MISSING smoke over pinned examples
-npm run fuzz                   # where it exists: scanner, generated-parser, corpus or fuzz-runner changes
-
-# compile every shipped query against one real file, not just highlights
-for q in queries/*.scm; do npx tree-sitter query "$q" "$SAMPLE" --quiet || echo "FAILED: $q"; done
-```
-
-Then rerun the probes from Part 3 and diff the census; with a reference parser,
-also `diff` a `skeleton --out` run from before against one from after. A file may
-only move closer to the reference: moving further, landing above it, or a moved
-reference side (the generic path, your control) needs an explanation. Compile
-**every** shipped query, not just `highlights.scm` — node-name drift breaks
-`locals`, `tags`, `folds` and `indents` silently, and those have no fixtures.
-
-**Never skip fuzz on a change that touches ambiguity resolution.** A precedence or
-conflict change can be correct on a full parse and wrong under editing: incremental
-re-parse reuses cached subtrees, and a decision that weighed two complete readings
-does not reliably get re-made. Corpus, examples and queries all parse whole files, so
-none of them can see this — and an editor re-parsing on every keystroke is the
-primary consumer. If fuzz fails, confirm your change caused it by stashing and
-replaying the same seed before you spend time on the parse itself. A pass counts only
-if fuzz could have failed here; `references/tree-sitter-mechanics.md` says how to
-read a failure line and how to run the control.
-
-If the change added a conflict, a recursive rule, a scanner token or a dedicated
-branch, record `src/parser.c` size, `STATE_COUNT` and parse throughput before and
-after, and what the growth bought.
-
-**Record a public AST change where consumers will look.** A new, renamed or removed
-node or field goes in the changelog, called out as a breaking AST change when it is
-one, with the affected queries updated in the same change. A change to where a
-construct ends also updates the contract's account of that boundary, residue
-included — `references/docs-contract.md`.
-
-**Report faithfully.** Say which leads still fire and why they are acceptable. A fix
-that resolves one class and leaves a related one open is a fine outcome; a fix
-described as complete when it isn't will be trusted later by someone who shouldn't.
-
-**Have it reviewed cold.** Before it goes out, hand the change to a reviewer with
-this skill and none of your context — a fresh agent will do — and ask what else it
-moved. On 2026-09-28 a cold review found every gap the maintainer's review then
-fixed.
+Run fuzz for ambiguity-resolution changes, update affected queries and public AST
+contracts, and report unresolved leads. Seek an independent review before shipping
+a parser patch. A contract principle change remains a separate maintainer decision.
 
 ---
 

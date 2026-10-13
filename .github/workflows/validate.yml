@@ -21,6 +21,10 @@ jobs:
           python-version: "3.12"
       - name: Validate Agent Skills
         run: python scripts/validate_skills.py
+      - name: Check resource links and privacy markers
+        run: python scripts/check_resources.py
+      - name: Run repository tooling tests
+        run: python scripts/test_check_resources.py
       - name: Run skill self-tests
         shell: bash
         run: |

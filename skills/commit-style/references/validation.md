@@ -94,3 +94,10 @@ harness；静态 validator 不能证明 agent 的判断正确。行为变更合�
 - 不给 agent 自己加 `Co-Authored-By`；仓库要求的 `Signed-off-by:` 照加。
 - diff 里出现的 token、内网地址、客户名和个人信息，不得被抄进 commit message；如果
   它们本身将进入 commit，停止提交并明确提示风险。
+
+## 7 · 维护走查范围
+
+本次调整前后按第 1–6 节核对入口与 `repository-style.md`：只读草稿、精确暂存、
+接收方规则优先、逐维 style profile、完整行宽、幂等与历史改写边界仍有明确指引。
+迁移的是按需读取的证据发现和风格示例，没有把参考文件变成提交授权。
+这是指令一致性走查；未执行新的独立 agent 触发测试或历史改写行为测试。

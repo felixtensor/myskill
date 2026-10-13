@@ -1,6 +1,8 @@
 # Term Table
 
-Established Chinese translations for game terminology. Must be applied consistently across all translated files.
+Project-specific baseline used by the bundled terminology helpers. Apply it only
+when it matches the target game's glossary. For another project, use its approved
+terms and names; do not normalize unrelated dialogue into this vocabulary.
 
 | English | Chinese | Notes |
 |---------|---------|-------|

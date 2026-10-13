@@ -1,15 +1,16 @@
 # Final Verification
 
-Use the project-local guard when available:
+Run from the project root with `TOOLS` selected as in `SKILL.md`.
+Use the actual source root; these examples use `game/`:
 
 ```bash
-python3 scripts/translation/translation_guard.py <filepath> --warnings-as-errors
+python3 "$TOOLS/translation_guard.py" <filepath> --root game --warnings-as-errors
 ```
 
 For a whole chapter directory:
 
 ```bash
-python3 scripts/translation/translation_guard.py tl/schinese/chapter_2 --warnings-as-errors
+python3 "$TOOLS/translation_guard.py" game/tl/schinese/chapter_2 --root game --warnings-as-errors
 ```
 
 Then verify Ren'Py can parse the translation tree:
@@ -18,7 +19,7 @@ Then verify Ren'Py can parse the translation tree:
 "$RENPY_SDK/renpy.sh" . translate schinese --count
 ```
 
-Acceptable final state for the file being committed:
+Acceptable final state for a completed translation:
 
 - `comment_mismatch`: 0
 - `old_changed`: 0

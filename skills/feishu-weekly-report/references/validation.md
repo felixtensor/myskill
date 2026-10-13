@@ -59,8 +59,16 @@ Walk these cases before and after changes, using synthetic work records and simu
 - **English skill and Chinese report.** Keep instructions and metadata English; preserve Chinese literal UI labels and write user content in the requested language.
 - **Private artifacts.** Keep evidence, personnel information, URLs, page snapshots, and reports outside the repository. Retain only generic template fields and public references.
 
-## Latest walkthrough
+## Validation scope
 
-On 2026-09-06, the pre-edit walkthrough identified obsolete expectations that required CLI installation for all filling and allowed authorized submission. It also lacked explicit preservation of user edits and separation of page completion from draft persistence. Those expectations were replaced by the cases above.
+Manual instruction walkthroughs cover the cases above. They check intake, mode and
+source routing, preservation of user edits, authorization and truthful completion
+claims. They do not execute page entry, login, autosave or restoration on a tenant.
 
-The post-edit manual walkthrough covered all cases above against the entrypoint and linked references. It established instruction consistency only. Live page entry, browser/native-client compatibility, autosave, and restoration remain untested on the user's tenant; do not describe them as executed integration tests.
+- **A tenant has different section labels or requirements** → use the baseline as
+  a mapping aid; inspect the live form rather than inventing five required sections.
+- **Skill maintenance or static CI passes** → do not claim live integration or
+  automatic skill-selection behavior was tested.
+
+The pre/post maintenance walkthrough preserved the cases above and checked the
+baseline-profile routing. No account, service installation or live form was used.

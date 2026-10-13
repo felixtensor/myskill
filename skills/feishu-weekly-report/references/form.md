@@ -1,12 +1,12 @@
 # Form Fields and Writing Rules
 
-Source: six weekly-report approval screenshots supplied by the user. These describe the visible business form, not an API schema. They do not establish control IDs, node requirements, minimum row counts, duration rules, or draft-saving capabilities. Inspect the live UI at execution time; use a definition read when available to supplement it.
+Baseline profile distilled from supplied weekly-report form screenshots; the images and account context are not distributed. These describe the visible business form, not an API schema. They do not establish control IDs, node requirements, minimum row counts, duration rules, or draft-saving capabilities. Inspect the live UI at execution time; use a definition read when available to supplement it.
 
 Chinese labels below are literal form identifiers. Preserve them for matching; explanatory instructions are in English.
 
-## Five sections
+## Baseline five-section profile
 
-All business fields listed below have required markers in the screenshots. Row numbers and controls for copying, deleting, or adding rows are not business fields.
+The baseline shows required markers for the business fields below; actual templates may differ. Row numbers and controls for copying, deleting, or adding rows are not business fields.
 
 | Section | Fields in each row, in order | Visible options or constraints |
 | --- | --- | --- |
@@ -16,7 +16,7 @@ All business fields listed below have required markers in the screenshots. Row n
 | Risks and issues — 四、风险与问题 | 风险/问题; 影响范围; 严重程度; 需要谁支持; 建议解决方案 | Impact: 进度 / 质量 / 成本 / 交付 / 验收 (schedule / quality / cost / delivery / acceptance); severity: 高 / 中 / 低 (high / medium / low) |
 | Cross-team collaboration — 五、跨团队协同需求 | 需要协同事项; 对接团队/人员; 期望完成时间; 不完成的影响 | Desired completion is a date |
 
-All five sections appear as repeatable tables. Inspect actual rows and controls in the page. When a definition is available, `fieldList` describes nested rows, and start, end, and duration may belong to one `dateInterval`. Neither API IDs nor an API definition read are required when the UI can be reliably inspected and edited.
+In the baseline, all five sections appear as repeatable tables. Inspect actual rows and controls in the page. When a definition is available, `fieldList` describes nested rows, and start, end, and duration may belong to one `dateInterval`. Neither API IDs nor an API definition read are required when the UI can be reliably inspected and edited.
 
 ## Content standards
 

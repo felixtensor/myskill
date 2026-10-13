@@ -29,10 +29,10 @@ python scripts/install_skills.py --list
 python scripts/install_skills.py --agent codex --scope user
 
 # 安装指定 skill 到当前项目的 Claude Code
-python scripts/install_skills.py --agent claude --scope project --skills weekly-report
+python scripts/install_skills.py --agent claude --scope project --skills feishu-weekly-report
 
 # 安装到任意客户端目录
-python scripts/install_skills.py --dest C:\path\to\skills --skills weekly-report
+python scripts/install_skills.py --dest C:\path\to\skills --skills feishu-weekly-report
 ```
 
 安装器使用复制而不是符号链接，以便在 Windows、macOS 和 Linux 上行为一致。替换已有 skill 必须显式使用 `--replace`；旧版本会移动到目标目录旁的 `.myskill-backups/`，便于恢复。
