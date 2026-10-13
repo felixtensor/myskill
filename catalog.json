@@ -28,6 +28,9 @@
     "feishu-weekly-report": {
       "categories": ["work", "effective"]
     },
+    "renpy-chinese-translation": {
+      "categories": ["work", "effective"]
+    },
     "tree-sitter-grammar-maintenance": {
       "categories": [
         "effective",
