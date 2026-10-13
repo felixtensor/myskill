@@ -45,13 +45,11 @@ every anchor; that is a wrong invocation, not a broken translation.
 - **Apply the same batch** → only quoted translated slots change; reference comments, `old`
   keys, speaker prefixes, suffixes, tags and interpolation are untouched, and the guard returns
   to 0 errors.
-- **`fix_terms.py`** → rewrites translated slots only; comments and `old` lines keep their text
-  even when they contain a known mistranslation.
-- **Known defect in the imported copy (2026-10-13).** When several `TERM_FIXES` patterns match
-  the same line, only the last matching pattern is persisted and the printed count also counts
-  the discarded matches. A line containing Haelo/Elie/Guardians/escort mistakes needed four runs
-  to converge (`陪侍` → `守护者` → `艾利` → `海洛`). Re-run until the report says 0 fixes and
-  re-check with the guard, or fix the loop before trusting a single pass.
+- **`fix_terms.py`** → rewrites translated slots only; comments, `old` keys, `voice` lines and
+  `translate` headers keep their text even when they contain a known mistranslation. Every
+  matching `TERM_FIXES` pattern applies to the evolving line in one pass, the reported count
+  matches the applied replacements, and a second run reports 0 fixes.
+  `scripts/test_fix_terms.py` pins that behaviour and control-line immunity.
 
 ## 3 · Review batches
 
