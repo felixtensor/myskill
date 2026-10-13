@@ -6,6 +6,8 @@
 
 ```powershell
 python scripts/validate_skills.py
+python scripts/check_resources.py
+python scripts/test_check_resources.py
 ```
 
 skill 自带 `scripts/test_*.py` 时，一并运行它们；CI 也会逐个执行。

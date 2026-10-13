@@ -148,8 +148,8 @@
   顶部是每轮重写的当前状态，下面按轮追加。
 - **不得提议重建已被审计淘汰的机制**（ledger、manifest、attestation、常驻 oracle、
   逐文件 AST 公证）。被问到时说明它们为什么被淘汰，并给出有边界的替代方案。
-- 本 skill 不涉及凭据、私有数据或外部写操作；报告中引用的都是公开仓库内容。未入库的
-  开发计划只作为维护者的本地笔记，内容不引用进 commit 或 PR。
+- parser 仓库也可能含有私有源码、计划或路径。对外报告只使用获准公开的证据，
+  不把本地审计记录或未入库计划抄进 commit 或 PR。
 
 ## 7 · `probe.py` 的确定性回归
 
@@ -200,36 +200,20 @@ python3 scripts/test_probe.py
 tree-sitter CLI 升级后，先在新版本下重抓夹具里的 parse 输出，再跑这组测试：输出格式的
 变化应该先在这里暴露，而不是在一次审计里悄悄出错。
 
-## 8 · 冷启动记录
+## 8 · 行为验证的范围与维护结论
 
-每个案例交给一个新 agent，只给用户原话，加上"无人值守、需要问就停下、不要提交"的
-说明，不提 skill 的名字。最后看它有没有触发、按什么顺序做了什么、写过哪些文件。
+过去的独立走查验证过审计、方言取舍、工具自检失败和修复副作用案例；后续的
+conflict 走查显式指定了 skill，因此只能作为行为证据，不能作为自动触发证据。
+逐次耗时、工具调用数、项目身份、分支和 issue 记录不作为技能规则保留。
 
-2026-09-28，skill 内容 `6e11a2b2ac03`，tree-sitter-mlir @ `a3bf55c`：
+保留的回归重点：
 
-| 案例 | 触发 | 关键行为 | 偏差与代价 |
-| --- | --- | --- | --- |
-| §1「有没有被 fallback 遮掩的问题」 | 是 | 先读契约和审计记录；provenance、generate、基线；skeleton → corpus → probe；按 mode 落层；不改 grammar；审计记录重写当前状态并追加一轮 | 新确认两条稳定核心缺陷，并给出按文件的验收标准。68 次工具调用，约 17 分钟 |
-| §2「affine.for 的语义」 | 否 | 直接回答，不跑探针 | 无 |
-| §4 声明的工具是 `opt` | 是 | 自检失败、以 2 退出后停下来问；没有自己换成审计记录里的 `mlir-opt` | 没读契约就先跑 skeleton；审计记录是翻被忽略的目录找到的。已补：`mlir.md` 写明记录位置，Part 0 写明要先问 |
-| §1「给 gpu.launch 加个规则」 | 是 | 落在第二行，按 `amdgpu.mfma` 先例判为不改，逐条说明四个条件不满足；把附近真正的边界问题归到已开着的 finding 1；列出要用户回答的问题 | 无。41 次工具调用 |
-| §1「改了 grammar，看有没有副作用」（对象是 #74 的修复） | 是 | 另建一份 HEAD 副本、各用独立的 `TREE_SITTER_LIBDIR` 做前后 census 和 skeleton 并 `diff`；逐类解释计数变化；额外 fuzz、围绕绑定行的增量编辑、对抗输入、触发行的上一行扫描 | 无。提出的四个问题——「never」说得太满、`"` 和不带点名字两个分支没有用例、代价没记录、同行和未绑定的残留——与维护者 review 时补的提交一一对应。中途被用量上限打断，续跑完成 |
+- 工具先按用户声明或审计记录选择，再做自检，不在自检失败后悄悄换工具。
+- 具名节点相同不证明完整 CST 相同；替代构造路径要用 `:cst` 对照。
+- 两种隐藏规则给出相同树时，先检查是否应重构，而不是默认保留 conflict。
+- 增量解析和全文件解析是不同证据；对照 checkout 必须隔离构建缓存。
+- 审计记录无法写入主 checkout 时，保存在允许的位置并说明待合并的记录。
 
-最后一行是这一轮最重要的结果：按 skill 做冷启动 review，找到的正是维护者 review 找到的
-缺口，而写修复的 agent 自己没看到。`SKILL.md` Part 5 因此加了「Have it reviewed cold」。
-仍然没有一个 agent 发现 #74 的 scanner token 丢了匿名的 `%` 子节点——具名节点相同，
-所有检查都只比具名节点。那是后续 #75 在做同类 token 时发现的，现在由 Part 5 的
-「Named nodes are not the whole tree」和一个 `:cst` 用例守住。
-
-2026-10-10，skill 工作树（`conflicts` 改动和 review 修复之后，未提交），tree-sitter-mlir @
-`dff9e35` 的两份 scratch clone。已安装的 `~/.claude/skills` 副本还是 9-29 的旧版，所以这一轮
-直接把 agent 指到工作树的 `SKILL.md`：**只测行为，没有测触发**。
-
-| 案例 | 触发 | 关键行为 | 偏差与代价 |
-| --- | --- | --- | --- |
-| §1「这里有歧义，加个 conflict 吧」（scratch 里删掉了 `_value_use_list × _value_use_and_type` 的声明和契约表里对应的一行） | 未测 | 没有因为 conflict 数会增加就拒绝，也没有直接加回。复现 generate 的报错，用符号序列造输入跑 `-d`：两种读法都能走完，由符号顺序决定，树完全相同；`mlir-opt` 只接受 bulk 形式。判为第 1 级，量了三个方案：照原样加回；合并两条隐藏规则（+9 个状态，树不变，fuzz 通过）；删掉 per-pair 形式（否决：会收窄通用路径）。停下来请用户选，记录写进被忽略的审计记录 | 50 次工具调用，约 14 分钟。暴露的缺口：第 4 级没写「两种读法的树相同就是第 1 级」（已补）；`mlir.md` 的「harmless today」容易被读成可以照旧加回（已改）；没写阶梯指向的级别高于用户要求时该怎么办（已补，mechanics）；Part 0 没覆盖 generate 不了的工作树，而失败的 generate 照样会改写 `src/grammar.json`（已补，Part 0）；`tree-sitter test` 和 fuzz 编译到按语言名缓存的共享目录，scratch 里的构建会覆盖主 checkout 用的库（已补，Part 3 和 mechanics：第二个 checkout 一律设 `TREE_SITTER_LIBDIR`） |
-| §1「现有的 conflict 都有必要吗 / conflict 表对不对」 | 未测 | provenance、generate、基线之后跑 `conflicts` 和 `--runtime --flip`，数字与 `mlir.md` 一致。又把每个声明换成静态 prec 做对照，并对照 MLIR 源码。5 个 UNPINNED 逐个落层：1 个缺陷，3 个补用例，1 个归到另一处歧义。它的结论是：11 个都是 load-bearing，但有 6 个可以换成静态 prec，其中两个当前选错了；表里第 1–3、4、7、10 行的原因不准。没有改任何受控文件 | 79 次工具调用，约 19 分钟。暴露的缺口：`--runtime` 只是下界，`stack_node_add_link` 会静默合并等价链接（已写进 mechanics）；`mlir.md` 说「几乎都在 `affine.for` 下」是错的，`_affine_for_operation_repeat1` 是所有 custom body 共用的 repeat（已改）；没有工具能回答「这个声明能不能换成静态 prec」，因为 `--flip` 把权重加在规则上（已补：`--static`）；import `probe.py` 会在 skill 目录里写 `__pycache__`（测试已关掉字节码；有了 `--static` 也不必再自己 import） |
-
-两轮都没有把「conflict 数会增加」当成拒绝的理由，也都没有不带记录就加。两轮都卡在同一处：Part 7 要求审计
-记录放在主 checkout，而这一轮 agent 只被允许写 scratch（已补：写在工作旁边，说明位置，由维护者合并）。
-第二轮的 MLIR 线索复核后提成了 felixtensor/tree-sitter-mlir #82–#85。
+本次维护前后按第 1–6 节逐项核对了入口及迁移后的参考文件。测量命令、落层依据、
+四个专用规则条件和授权边界均可沿入口找到；其他语言不会借用 MLIR 的 spec 或 gate。
+这是指令走查，没有执行真实 parser 审计，也没有重跑独立 agent 触发测试。

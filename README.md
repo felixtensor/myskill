@@ -1,14 +1,14 @@
 # myskill
 
-这是我的个人 Agent Skills 仓库，收集我日常反复使用的工作流。
+这是一个可移植的 Agent Skills 工作流仓库。
 
 ## Skills
 
-- [`commit-style`](skills/commit-style/) — 从成文规则与 history 逐维读出完整 commit
-  message 风格，再据此撰写
+- [`commit-style`](skills/commit-style/) — 按需读取仓库规则与 history，逐维识别 commit
+  message 风格；起草与提交授权分开
 - [`feishu-weekly-report`](skills/feishu-weekly-report/) — 汇总仓库与文档中的本周工作，在真实审批页面填写和反复 review，保留草稿能力，最终由用户提交（英文技能说明）
-- [`renpy-chinese-translation`](skills/renpy-chinese-translation/) — 翻译与审查 Ren'Py `.rpy` 译文：先守住参考注释与 `old` 键，机器初译后按 slot 批量审查，再用确定性术语修正收口（英文技能说明）
-- [`tree-sitter-grammar-maintenance`](skills/tree-sitter-grammar-maintenance/) — 拿 mlir-opt 等官方 parser 当参照，对比、定位、修复、验证成闭环，并把架构文档维护成判定取舍的准绳（英文技能说明）
+- [`renpy-chinese-translation`](skills/renpy-chinese-translation/) — 区分只读审查与翻译修改，按项目术语保护 `.rpy` 译文槽位；机器初译按需授权（英文技能说明）
+- [`tree-sitter-grammar-maintenance`](skills/tree-sitter-grammar-maintenance/) — 通用审计与修复流程按需加载，以语言契约判定取舍；附 MLIR 配置和其他语言接入指导（英文技能说明）
 
 完整列表和分类在 [skills/README.md](skills/README.md)。
 
@@ -17,6 +17,8 @@
 ```powershell
 python scripts/install_skills.py --list
 python scripts/validate_skills.py
+python scripts/check_resources.py
+python scripts/test_check_resources.py
 ```
 
 ## 文档

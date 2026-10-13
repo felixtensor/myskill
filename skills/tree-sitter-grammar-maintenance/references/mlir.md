@@ -14,7 +14,7 @@ repository first — this file tells you how to *use* it, not what it says.
 | Compatibility smoke | `examples/`, pinned by `examples/SOURCE.md` |
 | Grammar / scanner | `grammar.js`, `src/scanner.c` |
 | Roadmap and complexity budget | a development plan document, if the project keeps one — see below |
-| Audit record (`SKILL.md` Part 7) | local and untracked; it has lived at `tmp/AUDIT-LOG.md` in the main checkout, which a worktree does not have |
+| Audit record (`SKILL.md` Part 7) | local and untracked; e.g. `tmp/AUDIT-LOG.md` after confirming that directory is ignored |
 
 ## Which document governs what
 
@@ -99,7 +99,7 @@ a boundary hit. How the spec checks these boundaries, and where it cannot:
   starts a generic operation (`custom-body-generic-op`) must not fall inside a
   custom body. The second matters because an operation that binds nothing, once
   swallowed, leaves no trace any other check can see. Both have been regression
-  guards since the scanner's boundary tokens landed (#74, #75): expect zero.
+  guards for the scanner's boundary tokens: expect zero.
 - **A block label** — every line-initial label must yield a `block_label`
   (`block-label`). No body ran over a label line in the 617 examples on
   2026-09-28.
@@ -142,9 +142,9 @@ operation's trailing location. A new branch must clear the same bar.
 
 ## Verifying the document against the code
 
-| Claim | Command | Value when last checked (2026-09-29, `main` @ `ec93b00`) |
+| Claim | Command | Historical observation (recheck in the target checkout) |
 | --- | --- | --- |
-| "The 11 conflicts listed in grammar.js" are load-bearing | `probe.py conflicts --repo "$REPO"` | 11, none unnecessary — accurate (2026-10-10, `dff9e35`) |
+| "The 11 conflicts listed in grammar.js" are load-bearing | `probe.py conflicts --repo "$REPO"` | 11, none unnecessary (historical baseline; not a current-status claim) |
 | "emits five token kinds", "no persistent state" | `sed -n '/enum TokenType/,/};/p' src/scanner.c`; read `serialize` | 5 tokens, `serialize` returns 0 — accurate |
 | "Where a Custom Body Ends" table | each row's opener after a custom body, parsed; `custom-body-boundary` and `custom-body-generic-op` at zero | — |
 | Public AST surface names are real | grep each name in `src/node-types.json` | — |
@@ -157,9 +157,10 @@ is indistinguishable from a wrong one.
 
 ## The declared conflicts, measured
 
-`probe.py conflicts --runtime --flip --static` on `main` @ `dff9e35`, 2026-10-10,
-CLI 0.27.0: 617 examples and 203 corpus cases, about two minutes. Filed as
-felixtensor/tree-sitter-mlir #82–#85.
+Historical worked example from CLI 0.27.0 with 617 examples and 203 corpus cases.
+It illustrates how to interpret `probe.py conflicts --runtime --flip --static`;
+these findings are not the current issue list. Rerun against the target checkout
+and keep current status in its private audit record.
 
 - **All 11 are needed**: `generate` fails without any one of them. Their symbol
   sequences name the overlaps in the contract's table, but rows 1–3 ("before the
@@ -177,14 +178,14 @@ felixtensor/tree-sitter-mlir #82–#85.
 - **Three declarations are replaceable** by the static resolution `generate`
   offers, with no named node moving: that one (`prec` on `_value_use_list`),
   `_type_list_no_parens × _type_or_func_type` and `_custom_body_tensor_keyword ×
-  tensor_type` (#85).
+  tensor_type`.
 - **Two choices are wrong, and a static `prec` fixes each** with no other move:
   `{function_type = () -> ()}` loses its `function_type` (`prec` on
-  `_type_list_parens`, #83); and inside a custom body `!ns<...>` is a
+  `_type_list_parens`); and inside a custom body `!ns<...>` is a
   `dialect_type` alone but a `type_alias` plus loose tokens when something follows
-  (`prec` on `dialect_namespace`, #82). The corpus case *Unknown dialect type
+  (`prec` on `dialect_namespace`). The corpus case *Unknown dialect type
   without dot-qualified mnemonic* expects both readings of the same `!bar<>`.
-- **Four right readings no corpus case pins** (#84): favouring the other side
+- **Four right readings no corpus case pins**: favouring the other side
   moves them and `tree-sitter test` stays green.
 
 | Favoured side | Examples moved | What moves |
@@ -443,7 +444,7 @@ pass will rediscover the ugly tree and re-argue it.
 ## Worked triage: a must-fix
 
 Kept for the reasoning, not as a status report: whether the defect is still open
-belongs in the audit record, never here. Confirmed 2026-09-21 on tree-sitter-mlir `dev/recheck-rules`, first on CLI 0.26.12
+belongs in the audit record, never here. Observed first on CLI 0.26.12
 and again on 0.27.0 after repairing a lock/`node_modules` mismatch, with
 `src/parser.c` verified to regenerate identically from `grammar.js`.
 

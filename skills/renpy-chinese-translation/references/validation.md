@@ -2,7 +2,7 @@
 
 Walk these cases on a throwaway copy of a Ren'Py project before changing this skill. Never
 validate against a user's working tree, and never commit game content into this repository.
-Cases 1-6 were walked on 2026-10-13 against the copy imported from the local cc-switch store.
+An earlier walkthrough covered cases 1-6; its local import source is omitted for privacy.
 The Ren'Py parser check could not be walked there because no SDK was installed.
 
 ## Harness
@@ -19,7 +19,7 @@ its file arguments against the current directory. Run it from the project root a
 `game/` directory as root:
 
 ```bash
-python3 scripts/translation_guard.py game/tl/schinese/script.rpy --root game
+python3 "$TOOLS/translation_guard.py" game/tl/schinese/script.rpy --root game
 ```
 
 Passing `--root .` while the file lives under `game/tl/...` reports `ERROR missing_source` for
@@ -85,3 +85,22 @@ every anchor; that is a wrong invocation, not a broken translation.
 - **Re-running the guard or the batch export** → no file changes.
 - **Repository hygiene** → no credentials, no game content, no absolute home paths; only
   `RENPY_SDK` is referenced, as a runtime environment variable.
+
+## Maintenance review
+
+- **Review only** → inspect/export slots; do not translate, apply fixes or commit.
+- **Different game glossary** → use its terms; do not run the bundled fixer unless
+  its mappings fit. Skill-source maintenance is a separate scope from game edits.
+- **Private dialogue and no external-service authorization** → keep translation
+  offline; do not send it to the machine service just because the helper exists.
+- **Translation requested, no commit requested** → return verified file edits;
+  a second review does not authorize amending an earlier commit.
+
+The entrypoint and references were walked before and after this maintenance change
+against the structural, mode, path, unavailable-tool and privacy cases. This checks
+instruction consistency only; no machine service, SDK or game runtime was exercised.
+
+A temporary synthetic project also exercised the documented `--root game` command,
+one-slot JSONL export, replacement dry-run, slot-only write and no-op second write.
+The wrong `--root .` invocation produced `missing_source` as expected. This was an
+offline helper smoke check; it does not validate Ren'Py parsing or translation quality.
