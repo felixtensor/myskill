@@ -73,8 +73,11 @@ npm run fuzz                   # where it exists: scanner, generated-parser, cor
 for q in queries/*.scm; do npx tree-sitter query "$q" "$SAMPLE" --quiet || echo "FAILED: $q"; done
 ```
 
-Then rerun the probes from Part 3 and diff the census; with a reference parser,
-also `diff` a `skeleton --out` run from before against one from after. A file may
+Then rerun the supported probes from Part 3 and diff the census. When the profile
+has a validated normalizer, also `diff` a `skeleton --out` run from before against
+one from after. An AST-only reference tool instead uses its validated
+language-specific comparison; do not require `skeleton` merely because a reference
+executable exists. State which comparison has not been implemented. A file may
 only move closer to the reference: moving further, landing above it, or a moved
 reference side (the generic path, your control) needs an explanation. Compile
 **every** shipped query, not just `highlights.scm` — node-name drift breaks

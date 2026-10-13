@@ -150,7 +150,9 @@ provide an upper bound. Do not transplant MLIR's count assumptions to another
 language.
 
 Every grammar change gets before/after census and a diff with an explanation for
-each changed group; with a reference parser, also compare saved skeleton runs.
+each changed group. With a validated normalizer, also compare saved skeleton runs;
+an AST-only reference tool uses its validated language-specific comparison instead.
+Report any comparison this profile does not yet support.
 Keep outputs in a temporary directory. Build and parse with this checkout's parser,
 and isolate `TREE_SITTER_LIBDIR` for second-checkout test/fuzz runs.
 

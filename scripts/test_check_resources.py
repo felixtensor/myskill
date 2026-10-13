@@ -86,6 +86,34 @@ class LinkTests(unittest.TestCase):
         self.assertEqual(heading_anchors("## `tool` rules\n## `tool` rules\n```\n## hidden\n```\n"),
                          {"tool-rules", "tool-rules-1"})
 
+    def test_parentheses_and_escaped_parentheses_in_link_destinations(self):
+        target = self.root / "references/rules(offline).md"
+        target.write_text("# Rules\n", encoding="utf-8")
+        self.assertEqual(self.check(
+            "[rules](references/rules(offline).md)\n"
+            "[rules](references/rules\\(offline\\).md \"offline rules\")\n"), [])
+        target.unlink()
+        self.assertEqual([f.rule for f in self.check(
+            "[rules](references/rules(offline).md)")], ["missing-local-link"])
+
+    def test_heading_links_use_visible_text_and_duplicate_slugs_avoid_collisions(self):
+        (self.root / "references/rules.md").write_text(
+            "## [Visible title](https://example.com)\n"
+            "## foo\n## foo-1\n## foo\n", encoding="utf-8")
+        self.assertEqual(self.check(
+            "[x](references/rules.md#visible-title)\n"
+            "[x](references/rules.md#foo-2)\n"), [])
+
+    def test_code_angle_brackets_and_setext_headings(self):
+        (self.root / "references/rules.md").write_text(
+            "## Use `list<T>`\n\n"
+            "Setext title\n============\n\n"
+            "Another\nmultiline title\n---------------\n", encoding="utf-8")
+        self.assertEqual(self.check(
+            "[x](references/rules.md#use-listt)\n"
+            "[x](references/rules.md#setext-title)\n"
+            "[x](references/rules.md#another-multiline-title)\n"), [])
+
 
 class WorkingTreeTests(unittest.TestCase):
     def setUp(self):

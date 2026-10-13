@@ -25,9 +25,11 @@
   → 拿输入和期望树互相校验，不看它是否通过 `tree-sitter test`。通过本身不是证据。
 - **"我改了 grammar，帮我看看有没有副作用"**
   → 改动前后各跑一次 `census`（写到 `mktemp -d` 的目录），`diff` 之后逐条说明每类计数变化
-  和每个"计数相同、形状不同"的文件为什么应该变。有 reference parser 时，再各存一次
+  和每个"计数相同、形状不同"的文件为什么应该变。有已验证的 normalizer 时，再各存一次
   `skeleton --out` 并 `diff`：文件只能离 reference 更近；变远、新出现高于 reference、或
-  reference 一侧变了，都要给出解释。corpus 有重新生成的用例时跑 `corpus --before HEAD`。
+  reference 一侧变了，都要给出解释。只有 AST 的参考工具使用该语言已验证的映射；没有
+  比较实现时披露缺口，不能因存在参考可执行文件就运行不支持的 skeleton。
+  corpus 有重新生成的用例时跑 `corpus --before HEAD`。
   改动让同一个节点多了一条生成路径（alias、外部 token、另一条规则）时，查有没有 `:cst`
   用例比对两条路径——具名节点相同不等于树相同。只跑 `npm run test` 绿了就说没问题，
   属于未完成。
@@ -217,3 +219,7 @@ conflict 走查显式指定了 skill，因此只能作为行为证据，不能�
 本次维护前后按第 1–6 节逐项核对了入口及迁移后的参考文件。测量命令、落层依据、
 四个专用规则条件和授权边界均可沿入口找到；其他语言不会借用 MLIR 的 spec 或 gate。
 这是指令走查，没有执行真实 parser 审计，也没有重跑独立 agent 触发测试。
+
+后续独立差异复核覆盖了 AST-only profile 和新语言接入路径：入口与 patch 工作流按
+比较能力选择路径，onboarding 指向入口阅读表和 Part 0 路由，不再引用已迁走的仓库表。
+没有执行真实 parser 集成；这轮证据仅支持指令及引用的一致性。

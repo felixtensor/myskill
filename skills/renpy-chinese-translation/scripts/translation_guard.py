@@ -73,6 +73,10 @@ ALLOWED_ENGLISH_PATTERNS = [
     ]
 ]
 
+# These checks apply across projects; the other bundled warnings use one game's
+# glossary and writing conventions. Generic mode preserves all structural gates.
+GENERAL_TEXT_CHECKS = {"ascii_punctuation", "zero_width_space"}
+
 
 @dataclass(frozen=True)
 class Issue:
@@ -91,9 +95,10 @@ class ParsedLine:
 
 
 class Guard:
-    def __init__(self, root: Path, max_examples: int) -> None:
+    def __init__(self, root: Path, max_examples: int, term_profile: str = "baseline") -> None:
         self.root = root
         self.max_examples = max_examples
+        self.term_profile = term_profile
         self.issues: list[Issue] = []
         self.source_cache: dict[str, list[str] | None] = {}
 
@@ -333,10 +338,12 @@ class Guard:
             severity = "ERROR" if not CHINESE_RE.search(clean) else "WARN"
             self.add(severity, "english_left", file, line, "translated text still contains English words")
 
-        if RAW_NAME_RE.search(clean):
+        if self.term_profile == "baseline" and RAW_NAME_RE.search(clean):
             self.add("WARN", "raw_term_left", file, line, "translated text still contains raw English term/name")
 
         for kind, pattern in FORBIDDEN_TERMS:
+            if self.term_profile == "generic" and kind not in GENERAL_TEXT_CHECKS:
+                continue
             if pattern.search(clean):
                 self.add("WARN", kind, file, line, f"forbidden or suspicious term matched: {pattern.pattern}")
 
@@ -446,13 +453,17 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--root", default=".", help="Game root directory. Defaults to current directory.")
     parser.add_argument("--max-examples", type=int, default=6, help="Maximum examples to print per issue kind.")
     parser.add_argument("--warnings-as-errors", action="store_true", help="Exit non-zero when warnings are present.")
+    parser.add_argument("--term-profile", choices=("baseline", "generic"), default="baseline",
+                        help="baseline: bundled game terminology; generic: structural, "
+                        "English-leftover and general text checks only. "
+                        "Review the project's glossary separately.")
     parser.add_argument("--renpy-sdk", help="Optional Ren'Py SDK directory for translate --count syntax checking.")
     parser.add_argument("--language", default="schinese", help="Ren'Py language name. Defaults to schinese.")
     args = parser.parse_args(argv)
 
     root = Path(args.root).resolve()
     files = collect_files(args.paths)
-    guard = Guard(root=root, max_examples=args.max_examples)
+    guard = Guard(root=root, max_examples=args.max_examples, term_profile=args.term_profile)
     guard.scan(files)
     guard.print_report(files)
 

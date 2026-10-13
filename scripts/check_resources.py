@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from html import escape, unescape
 from pathlib import Path
 import re
 import subprocess
@@ -38,7 +39,8 @@ PRIVACY_RULES = {
 }
 EMAIL = re.compile(r"\b[A-Za-z0-9._%+-]+@([A-Za-z0-9.-]+\.[A-Za-z]{2,})\b")
 EXAMPLE_DOMAINS = {"example.com", "example.org", "example.net", "example.invalid"}
-INLINE_LINK = re.compile(r"!?\[[^\]\n]*\]\(\s*(<[^>\n]+>|[^\s)]+)(?:\s+[^)\n]+)?\s*\)")
+INLINE_START = re.compile(r"!?\[([^\]\n]*)\]\(\s*")
+LINK_END = re.compile(r'''\s*(?:"(?:\\.|[^"\\\n])*"|'(?:\\.|[^'\\\n])*'|\([^()\n]*\))?\s*\)''')
 REFERENCE_LINK = re.compile(r"^\s{0,3}\[[^\]\n]+\]:\s*(<[^>\n]+>|\S+)", re.M)
 
 
@@ -87,16 +89,69 @@ def markdown_prose(text: str, *, strip_inline_code: bool = True) -> str:
     return "".join(lines)
 
 
+def inline_links(text: str):
+    """Yield inline destinations, balancing parentheses and honoring escapes."""
+    for match in INLINE_START.finditer(text):
+        start = position = match.end()
+        angle = position < len(text) and text[position] == "<"
+        if angle:
+            start = position = position + 1
+        depth = 0
+        while position < len(text):
+            char = text[position]
+            if char == "\\" and position + 1 < len(text):
+                position += 2
+                continue
+            if angle:
+                if char in ">\n":
+                    break
+            else:
+                if char.isspace() or (char == ")" and depth == 0):
+                    break
+                if char == "(":
+                    depth += 1
+                elif char == ")":
+                    depth -= 1
+            position += 1
+        if depth or (angle and (position == len(text) or text[position] != ">")):
+            continue
+        end = LINK_END.match(text, position + int(angle))
+        if end:
+            yield match.start(), end.end(), match.group(1), text[start:position]
+
+
+def unescape_destination(target: str) -> str:
+    return re.sub(r"\\([!\"#$%&'()*+,\-./:;<=>?@\[\]^_`{|}~])", r"\1", unescape(target))
+
+
 def heading_anchors(text: str) -> set[str]:
     anchors = set()
     counts: dict[str, int] = {}
+    paragraph = []
     for line in markdown_prose(text, strip_inline_code=False).splitlines():
         match = re.match(r"^\s{0,3}#{1,6}\s+(.+?)\s*#*\s*$", line)
-        if not match:
+        if match:
+            title = match.group(1)
+        elif paragraph and re.match(r"^ {0,3}(?:=+|-+)\s*$", line):
+            title = " ".join(paragraph)
+        else:
+            if not line.strip() or re.match(r"^ {0,3}(?:[-+*] |\d+[.)] |>|\|)", line):
+                paragraph = []
+            else:
+                paragraph.append(line.strip())
             continue
-        title = match.group(1).lower()
+        paragraph = []
+        # Slugs use the rendered label, not a link's invisible destination.
+        for start, end, label, _ in reversed(list(inline_links(title))):
+            title = title[:start] + label + title[end:]
+        # Code-span contents are literal text, including <T> and HTML entities.
+        title = re.sub(r"(`+)([^`\n]*?)\1|<[^>]*>",
+                       lambda m: escape(m.group(2)) if m.group(1) else "", title)
+        title = unescape(title).lower()
         slug = "".join(c for c in title if c.isalnum() or c in " _-").replace(" ", "-")
         count = counts.get(slug, 0)
+        while (slug if count == 0 else f"{slug}-{count}") in anchors:
+            count += 1
         counts[slug] = count + 1
         anchors.add(slug if count == 0 else f"{slug}-{count}")
     return anchors
@@ -106,33 +161,35 @@ def link_findings(root: Path, file: Path, text: str) -> list[Finding]:
     prose = markdown_prose(text)
     findings = []
     label = file.relative_to(root).as_posix()
-    for pattern in (INLINE_LINK, REFERENCE_LINK):
-        for match in pattern.finditer(prose):
-            target = match.group(1).strip("<>")
-            number = prose.count("\n", 0, match.start()) + 1
-            # External sources are preserved; this checker never performs network requests.
-            if target.startswith("//"):
-                continue
-            if re.match(r"^[A-Za-z]:[\\/]", target):
-                findings.append(Finding(label, number, "absolute-local-link"))
-                continue
-            url = urlsplit(target)
-            if url.scheme:
-                if url.scheme == "file":
-                    findings.append(Finding(label, number, "nonportable-file-link"))
-                continue
-            if url.path.startswith("/"):
-                findings.append(Finding(label, number, "absolute-local-link"))
-                continue
-            resolved = (file.parent / unquote(url.path)).resolve() if url.path else file.resolve()
-            if not resolved.is_relative_to(root):
-                findings.append(Finding(label, number, "link-outside-repository"))
-            elif not resolved.exists():
-                findings.append(Finding(label, number, "missing-local-link"))
-            elif url.fragment and resolved.suffix == ".md" and resolved.is_file():
-                anchors = heading_anchors(resolved.read_text(encoding="utf-8"))
-                if unquote(url.fragment) not in anchors:
-                    findings.append(Finding(label, number, "missing-local-anchor"))
+    destinations = [(start, target) for start, _, _, target in inline_links(prose)]
+    destinations.extend((match.start(), match.group(1).strip("<>"))
+                        for match in REFERENCE_LINK.finditer(prose))
+    for start, destination in destinations:
+        target = unescape_destination(destination)
+        number = prose.count("\n", 0, start) + 1
+        # External sources are preserved; this checker never performs network requests.
+        if target.startswith("//"):
+            continue
+        if re.match(r"^[A-Za-z]:[\\/]", target):
+            findings.append(Finding(label, number, "absolute-local-link"))
+            continue
+        url = urlsplit(target)
+        if url.scheme:
+            if url.scheme == "file":
+                findings.append(Finding(label, number, "nonportable-file-link"))
+            continue
+        if url.path.startswith("/"):
+            findings.append(Finding(label, number, "absolute-local-link"))
+            continue
+        resolved = (file.parent / unquote(url.path)).resolve() if url.path else file.resolve()
+        if not resolved.is_relative_to(root):
+            findings.append(Finding(label, number, "link-outside-repository"))
+        elif not resolved.exists():
+            findings.append(Finding(label, number, "missing-local-link"))
+        elif url.fragment and resolved.suffix == ".md" and resolved.is_file():
+            anchors = heading_anchors(resolved.read_text(encoding="utf-8"))
+            if unquote(url.fragment) not in anchors:
+                findings.append(Finding(label, number, "missing-local-anchor"))
     return findings
 
 
