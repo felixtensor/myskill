@@ -90,7 +90,18 @@ every anchor; that is a wrong invocation, not a broken translation.
 
 - **Review only** → inspect/export slots; do not translate, apply fixes or commit.
 - **Different game glossary** → use its terms; do not run the bundled fixer unless
-  its mappings fit. Skill-source maintenance is a separate scope from game edits.
+  its mappings fit. Select `--term-profile generic` on the bundled guard, keep
+  `--warnings-as-errors`, and review every slot against the approved glossary.
+  A clean generic result does not certify that glossary. A project-local guard
+  must support the selected glossary; inspect its help before adapting commands.
+  Skill-source maintenance is a separate scope from game edits.
+- **Default baseline** → the approved baseline passes; replacing `羁绊状态` with
+  `枢纽状态` still produces `nexus_wrong` and fails strict final verification.
+- **Generic profile** → that same text passes when `枢纽状态` is approved by the
+  other game's glossary. Tag/interpolation/comment/old/speaker/suffix/voice/block
+  corruption still fails. English leftovers, ASCII punctuation and zero-width
+  text still fail with `--warnings-as-errors`. Every guard invocation is read-only.
+  `scripts/test_translation_guard.py` exercises these outcomes through the CLI.
 - **Private dialogue and no external-service authorization** → keep translation
   offline; do not send it to the machine service just because the helper exists.
 - **Translation requested, no commit requested** → return verified file edits;
@@ -104,3 +115,12 @@ A temporary synthetic project also exercised the documented `--root game` comman
 one-slot JSONL export, replacement dry-run, slot-only write and no-op second write.
 The wrong `--root .` invocation produced `missing_source` as expected. This was an
 offline helper smoke check; it does not validate Ren'Py parsing or translation quality.
+
+An independent offline walkthrough then exported/reviewed three slots and applied
+a slot-safe replacement batch using another approved glossary. It exposed the
+baseline-only guard rejecting that glossary; the profile cases above cover the
+correction. Review/dry-run preserved bytes, a repeat write made no replacements,
+and 15 injected structural/text errors were rejected after correction. A simulated
+project-local older guard without the profile flag was replaced by the bundled
+guard according to the documented fallback. No external service, SDK,
+game runtime or automatic skill-selection evaluation ran.

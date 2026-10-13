@@ -87,10 +87,12 @@ input it must flag and a correct one it must leave alone, both from the real CLI
 
 ## Then
 
-Add the repository to the table in `SKILL.md` Part 0 — contract, spec, and a
-`references/<language>.md` for its gates, layer table and lexical traps, in the
-shape of `references/mlir.md` — and start an audit record in an ignored directory as
-described in Part 7.
+Add a language profile link to the reading table in `SKILL.md`, with a matching
+route in Part 0. The profile names its contract, spec, gates, layer table and
+lexical traps; use `references/mlir.md` as an organizational example. State which
+reference comparisons are supported: a validated normalizer for `skeleton`, or
+a separately validated mapping for AST/record output. Start an audit record in an
+ignored directory as described in Part 7.
 
 Until a contract document exists, be explicit about what you can and cannot say: an
 ERROR/MISSING sweep and a corpus self-consistency check both work without one — the

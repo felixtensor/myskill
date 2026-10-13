@@ -57,12 +57,21 @@ not a universal glossary for every game. Prefer the target project's glossary an
 validated local fixer. If the bundled mappings do not fit, review terms in context
 and apply slot-safe replacements instead of forcing those mappings.
 
+For the bundled guard, set `TERM_PROFILE=baseline` when that glossary fits.
+Set `TERM_PROFILE=generic` for a different approved glossary: this keeps structural,
+English-leftover, punctuation and zero-width checks, but does not validate that
+project's terminology. Review every slot against its glossary before final acceptance.
+For project-local guards, inspect `--help` and use their equivalent glossary option;
+omit `--term-profile` only after verifying their default matches the project glossary.
+Use the bundled guard if the local guard cannot represent the selected profile.
+Batch flags are review hints from the bundled baseline; confirm them in context.
+
 ## Translation and revision workflow
 
 1. Preflight the target file:
 
    ```bash
-   python3 "$TOOLS/translation_guard.py" <filepath> --root game --max-examples 20
+   python3 "$TOOLS/translation_guard.py" <filepath> --root game --term-profile "$TERM_PROFILE" --max-examples 20
    ```
 
    Resolve structural errors first: comment mismatches, `old_changed`, bad dialogue syntax, suffix/tag/interpolation mismatches. Untranslated English is expected before initial translation.
@@ -86,7 +95,7 @@ and apply slot-safe replacements instead of forcing those mappings.
 4. Run the gate again:
 
    ```bash
-   python3 "$TOOLS/translation_guard.py" <filepath> --root game --max-examples 20
+   python3 "$TOOLS/translation_guard.py" <filepath> --root game --term-profile "$TERM_PROFILE" --max-examples 20
    ```
 
 5. Do LLM slot-by-slot review. Do not rely on free-form whole-file browsing. Export bounded batches:
@@ -104,7 +113,7 @@ and apply slot-safe replacements instead of forcing those mappings.
 
    Check:
 
-   - Term table violations: see `references/term-table.md`.
+   - Violations of the selected project glossary; use `references/term-table.md` only when that baseline fits.
    - Project names and stable mistranslations established by the selected glossary.
    - Ambiguous words like `灰色`, `本质`, and `审判` require source-context review rather than blind replacement.
    - Character voice, idioms, sexual/violent wording, raw English leftovers, smart quotes, escaped quotes, placeholders, zero-width spaces, and unnatural Chinese phrasing.
@@ -114,17 +123,17 @@ and apply slot-safe replacements instead of forcing those mappings.
    ```bash
    python3 "$TOOLS/translation_replace.py" fixes.json <filepath> --dry-run
    python3 "$TOOLS/translation_replace.py" fixes.json <filepath>
-   python3 "$TOOLS/translation_guard.py" <filepath> --root game --max-examples 20
+   python3 "$TOOLS/translation_guard.py" <filepath> --root game --term-profile "$TERM_PROFILE" --max-examples 20
    ```
 
 7. Final verification:
 
    ```bash
-   python3 "$TOOLS/translation_guard.py" <filepath> --root game --warnings-as-errors
+   python3 "$TOOLS/translation_guard.py" <filepath> --root game --term-profile "$TERM_PROFILE" --warnings-as-errors
    "$RENPY_SDK/renpy.sh" . translate schinese --count
    ```
 
-8. Inspect the final diff and report the files changed, slot-review coverage, guard
+8. Inspect the final diff and report the files changed, selected glossary/profile, slot-review coverage, guard
    outcome, and whether SDK/runtime checks ran. Follow [final verification](references/verify.md).
    Commit only if requested, using the receiving repository's convention. Amend
    history only when the user identifies and authorizes that target; reviewing a
